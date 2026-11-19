@@ -40,6 +40,7 @@ import {
   TargetRule,
   TileKind,
   TowerEntity,
+  TowerPreset,
   TriggerType,
   UtilityNodeEntity,
   WaveDefinition,
@@ -56,8 +57,8 @@ const STARTING_LIVES = 20;
 
 export class VectraEngine {
   public grid: TileKind[] = new Array(GRID_COLS * GRID_ROWS).fill('EMPTY');
-  public spawn: GridPoint = { x: 0, y: 5 };
-  public goal: GridPoint = { x: 19, y: 6 };
+  public spawn: GridPoint = { x: 5, y: 0 };
+  public goal: GridPoint = { x: 6, y: 19 };
   public obstacles: GridPoint[] = [];
   public waves: WaveDefinition[] = DEFAULT_WAVES;
   public mapName = MAP_PRESETS[0].name;
@@ -211,14 +212,14 @@ export class VectraEngine {
       modifier?: ModifierType;
     }> = [
       { x: 4, y: 4, kind: 'TOWER', trigger: 'PULSE', payload: 'KINETIC', modifier: 'CHAIN' },
-      { x: 4, y: 5, kind: 'OVERCLOCK' },
-      { x: 4, y: 6, kind: 'TOWER', trigger: 'NOVA', payload: 'CRYO', modifier: 'SPLASH' },
-      { x: 8, y: 6, kind: 'TOWER', trigger: 'BEAM', payload: 'CORRODE', modifier: 'NONE' },
-      { x: 10, y: 5, kind: 'PRISM' },
-      { x: 11, y: 8, kind: 'TOWER', trigger: 'PULSE', payload: 'KINETIC', modifier: 'PIERCE' },
-      { x: 14, y: 5, kind: 'TOWER', trigger: 'BEAM', payload: 'KINETIC', modifier: 'CHAIN' },
-      { x: 14, y: 4, kind: 'OVERCLOCK' },
-      { x: 15, y: 7, kind: 'TOWER', trigger: 'NOVA', payload: 'CRYO', modifier: 'NONE' },
+      { x: 5, y: 4, kind: 'OVERCLOCK' },
+      { x: 6, y: 4, kind: 'TOWER', trigger: 'NOVA', payload: 'CRYO', modifier: 'SPLASH' },
+      { x: 6, y: 8, kind: 'TOWER', trigger: 'BEAM', payload: 'CORRODE', modifier: 'NONE' },
+      { x: 5, y: 10, kind: 'PRISM' },
+      { x: 8, y: 11, kind: 'TOWER', trigger: 'PULSE', payload: 'KINETIC', modifier: 'PIERCE' },
+      { x: 5, y: 14, kind: 'TOWER', trigger: 'BEAM', payload: 'KINETIC', modifier: 'CHAIN' },
+      { x: 4, y: 14, kind: 'OVERCLOCK' },
+      { x: 7, y: 15, kind: 'TOWER', trigger: 'NOVA', payload: 'CRYO', modifier: 'NONE' },
     ];
 
     for (const b of demoBuilds) {
@@ -276,9 +277,15 @@ export class VectraEngine {
     return base;
   }
 
-  public placeEntity(x: number, y: number, kind: 'TOWER' | 'OVERCLOCK' | 'PRISM'): string | null {
+  public placeEntity(
+    x: number,
+    y: number,
+    kind: 'TOWER' | 'OVERCLOCK' | 'PRISM',
+    preset?: TowerPreset | null
+  ): string | null {
     if (this.gameOutcome !== 'RUNNING') return null;
-    const cost = COSTS[kind];
+    const activePreset = kind === 'TOWER' ? preset ?? null : null;
+    const cost = activePreset ? activePreset.cost : COSTS[kind];
     const check = this.checkPlacement(x, y, cost);
     if (!check.valid) {
       this.emitSound('INVALID');
@@ -297,14 +304,14 @@ export class VectraEngine {
         kind: 'TOWER',
         x,
         y,
-        trigger: 'PULSE',
-        payload: 'KINETIC',
-        modifier: 'NONE',
+        trigger: activePreset ? activePreset.trigger : 'PULSE',
+        payload: activePreset ? activePreset.payload : 'KINETIC',
+        modifier: activePreset ? activePreset.modifier : 'NONE',
         rules: [createRule('Any', 'DistToGoal', 'ASC')],
         investedGold: cost,
         placedInWave: this.waveActive ? this.waveIndex : -1,
         cooldown: 0,
-        angle: 0,
+        angle: -Math.PI / 2,
         beamTargetId: null,
         beamPrismId: null,
         beamRampTime: 0,
@@ -332,13 +339,14 @@ export class VectraEngine {
     const pal = getActivePalette();
     this.flowField = computeFlowField(this.grid, this.spawn, this.goal);
     this.selectedEntityId = this.demoMode ? null : id;
-    this.particleSystem.emitConstructBurst(
-      x + 0.5,
-      y + 0.5,
-      kind === 'OVERCLOCK' ? pal.overclock : kind === 'PRISM' ? pal.prism : pal.triggers.PULSE,
-      9,
-      pal
-    );
+    const burstColor = activePreset
+      ? pal.payloads[activePreset.payload]
+      : kind === 'OVERCLOCK'
+      ? pal.overclock
+      : kind === 'PRISM'
+      ? pal.prism
+      : pal.triggers.PULSE;
+    this.particleSystem.emitConstructBurst(x + 0.5, y + 0.5, burstColor, activePreset ? 13 : 9, pal);
     this.emitSound('BUILD');
     this.notify();
     return id;
@@ -591,11 +599,11 @@ export class VectraEngine {
     const enemy: EnemyEntity = {
       id: `en_${this.enemySeq++}`,
       type,
-      x: this.spawn.x + 0.5 + jitter * 0.5,
-      y: this.spawn.y + 0.5 + jitter,
+      x: this.spawn.x + 0.5 + jitter,
+      y: this.spawn.y + 0.5 + jitter * 0.5,
       vx: 0,
       vy: 0,
-      angle: 0,
+      angle: Math.PI / 2,
       hp,
       maxHp: hp,
       displayHp: hp,

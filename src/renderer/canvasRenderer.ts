@@ -8,6 +8,7 @@ import {
   GridPoint,
   PlacementCheckResult,
   TowerEntity,
+  TowerPreset,
   UtilityNodeEntity,
 } from '../sim/types';
 import { ThemePalette, getActivePalette } from '../theme/palettes';
@@ -23,6 +24,7 @@ export interface RenderOptions {
   hoverTile: GridPoint | null;
   pendingTile: GridPoint | null;
   activeTool: BuildTool;
+  activePreset?: TowerPreset | null;
   showFlowField: boolean;
   obstacleEditMode: boolean;
   timeSec: number;
@@ -48,9 +50,10 @@ export function clampCamera(
   if (zoom <= 1.001) {
     return { zoom: 1, panX: 0, panY: 0 };
   }
-  const pad = canvasW < 640 ? 8 : 20;
-  const availW = Math.max(160, canvasW - pad * 2);
-  const availH = Math.max(100, canvasH - pad * 2);
+  const padX = canvasW < 640 ? 8 : 20;
+  const padY = canvasW < 640 ? 6 : 12;
+  const availW = Math.max(160, canvasW - padX * 2);
+  const availH = Math.max(100, canvasH - padY * 2);
   const baseTile = Math.min(availW / GRID_COLS, availH / GRID_ROWS);
   const boardW = baseTile * GRID_COLS * zoom;
   const boardH = baseTile * GRID_ROWS * zoom;
@@ -70,9 +73,10 @@ export function computeBoardTransform(
   canvasH: number,
   camera: CameraView = { zoom: 1, panX: 0, panY: 0 }
 ): BoardTransform {
-  const pad = canvasW < 640 ? 8 : 20;
-  const availW = Math.max(160, canvasW - pad * 2);
-  const availH = Math.max(100, canvasH - pad * 2);
+  const padX = canvasW < 640 ? 8 : 20;
+  const padY = canvasW < 640 ? 6 : 12;
+  const availW = Math.max(160, canvasW - padX * 2);
+  const availH = Math.max(100, canvasH - padY * 2);
   const baseTileSize = Math.min(availW / GRID_COLS, availH / GRID_ROWS);
   const clamped = clampCamera(canvasW, canvasH, camera);
   const tileSize = baseTileSize * clamped.zoom;
@@ -216,7 +220,12 @@ export function renderVectraCanvas(
   }
 
   // 6. Spawn Warp Gate & Goal Reactor Core
-  drawSpawnTile(ctx, engine.spawn.x * ts, engine.spawn.y * ts, ts, opts.timeSec, pal);
+  const spawnIdx = tileIndex(engine.spawn.x, engine.spawn.y);
+  const spawnDx = engine.flowField.nextX[spawnIdx] ?? 0;
+  const spawnDy = engine.flowField.nextY[spawnIdx] ?? 1;
+  const spawnAngle =
+    spawnDx !== 0 || spawnDy !== 0 ? Math.atan2(spawnDy, spawnDx) : Math.PI / 2;
+  drawSpawnTile(ctx, engine.spawn.x * ts, engine.spawn.y * ts, ts, opts.timeSec, pal, spawnAngle);
   drawGoalTile(
     ctx,
     engine.goal.x * ts,
@@ -427,7 +436,10 @@ function getPlacementCheck(
     return engine.checkPlacement(tile.x, tile.y, 0);
   }
   if (opts.activeTool === 'INSPECT') return null;
-  const cost = COSTS[opts.activeTool];
+  const cost =
+    opts.activeTool === 'TOWER' && opts.activePreset
+      ? opts.activePreset.cost
+      : COSTS[opts.activeTool];
   return engine.checkPlacement(tile.x, tile.y, cost);
 }
 
@@ -597,7 +609,8 @@ function drawSpawnTile(
   py: number,
   ts: number,
   timeSec: number,
-  pal: ThemePalette
+  pal: ThemePalette,
+  dirAngle = Math.PI / 2
 ): void {
   const cx = px + ts / 2;
   const cy = py + ts / 2;
@@ -637,7 +650,9 @@ function drawSpawnTile(
   ctx.stroke();
   ctx.restore();
 
-  // Core directional chevron
+  // Core directional chevron aligned to initial flow direction (downward top-to-bottom)
+  ctx.save();
+  ctx.rotate(dirAngle);
   ctx.fillStyle = pal.spawnCore;
   ctx.beginPath();
   ctx.moveTo(ts * 0.16, 0);
@@ -646,6 +661,7 @@ function drawSpawnTile(
   ctx.lineTo(-ts * 0.1, ts * 0.13);
   ctx.closePath();
   ctx.fill();
+  ctx.restore();
   ctx.restore();
 }
 
@@ -1803,12 +1819,17 @@ function drawHoverOverlay(
 
   if (valid) {
     if (opts.activeTool === 'TOWER') {
-      ctx.strokeStyle = pal.triggers.PULSE;
-      ctx.globalAlpha = 0.65;
+      const pr = opts.activePreset ?? null;
+      const trig = pr ? pr.trigger : 'PULSE';
+      const mod = pr ? pr.modifier : 'NONE';
+      const baseRange = TRIGGERS[trig].range;
+      const effRange = trig === 'NOVA' && mod === 'PIERCE' ? baseRange + 0.55 : baseRange;
+      ctx.strokeStyle = pr ? pal.payloads[pr.payload] : pal.triggers.PULSE;
+      ctx.globalAlpha = 0.68;
       ctx.lineWidth = 1.5;
       ctx.setLineDash([5, 4]);
       ctx.beginPath();
-      ctx.arc(cx, cy, TRIGGERS.PULSE.range * ts, 0, Math.PI * 2);
+      ctx.arc(cx, cy, effRange * ts, 0, Math.PI * 2);
       ctx.stroke();
       ctx.setLineDash([]);
       ctx.globalAlpha = 1;
@@ -1863,7 +1884,18 @@ function drawHoverOverlay(
   ctx.strokeRect(px + 1.5, py + 1.5, ts - 3, ts - 3);
 
   // Semi-transparent ghost silhouette
-  drawGhostStructure(ctx, cx, cy, ts, opts.activeTool, opts.timeSec, valid, isLockedTouch, pal);
+  drawGhostStructure(
+    ctx,
+    cx,
+    cy,
+    ts,
+    opts.activeTool,
+    opts.activePreset ?? null,
+    opts.timeSec,
+    valid,
+    isLockedTouch,
+    pal
+  );
 
   // Explicit mobile first-tap pending preview
   if (isLockedTouch) {
@@ -1964,6 +1996,7 @@ function drawGhostStructure(
   cy: number,
   ts: number,
   tool: BuildTool,
+  activePreset: TowerPreset | null,
   timeSec: number,
   valid: boolean,
   isLockedTouch: boolean,
@@ -1979,28 +2012,61 @@ function drawGhostStructure(
   ctx.globalAlpha = valid ? (isLockedTouch ? 0.72 : 0.52) : 0.32;
 
   if (tool === 'TOWER') {
+    const trig = activePreset ? activePreset.trigger : 'PULSE';
+    const pay = activePreset ? activePreset.payload : 'KINETIC';
+    const trigColor = valid ? pal.triggers[trig] : pal.invalidColor;
+    const payColor = valid ? pal.payloads[pay] : pal.invalidColor;
+
     ctx.fillStyle = pal.towerBodyMid;
-    ctx.strokeStyle = valid ? pal.triggers.PULSE : pal.invalidColor;
+    ctx.strokeStyle = trigColor;
     ctx.lineWidth = 1.6;
     drawChamferRect(ctx, -half, -half, half * 2, half * 2, ts * 0.12);
     ctx.fill();
     ctx.stroke();
 
-    ctx.fillStyle = pal.towerBarrelFill;
-    ctx.strokeStyle = valid ? pal.triggers.PULSE : pal.invalidColor;
-    ctx.lineWidth = 1.5;
-    ctx.fillRect(0, -ts * 0.08, ts * 0.36, ts * 0.16);
-    ctx.strokeRect(0, -ts * 0.08, ts * 0.36, ts * 0.16);
+    if (trig === 'NOVA') {
+      ctx.strokeStyle = trigColor;
+      ctx.lineWidth = 1.8;
+      ctx.beginPath();
+      ctx.arc(0, 0, half * 0.62, 0, Math.PI * 2);
+      ctx.stroke();
+    } else if (trig === 'BEAM') {
+      ctx.fillStyle = pal.towerBarrelFill;
+      ctx.strokeStyle = trigColor;
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.moveTo(ts * 0.36, 0);
+      ctx.lineTo(-ts * 0.1, -ts * 0.15);
+      ctx.lineTo(-ts * 0.04, 0);
+      ctx.lineTo(-ts * 0.1, ts * 0.15);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    } else {
+      ctx.fillStyle = pal.towerBarrelFill;
+      ctx.strokeStyle = trigColor;
+      ctx.lineWidth = 1.5;
+      ctx.fillRect(0, -ts * 0.08, ts * 0.36, ts * 0.16);
+      ctx.strokeRect(0, -ts * 0.08, ts * 0.36, ts * 0.16);
+    }
 
     const coreR = ts * 0.14;
-    ctx.fillStyle = valid ? pal.payloads.KINETIC : pal.invalidColor;
-    ctx.beginPath();
-    ctx.moveTo(0, -coreR);
-    ctx.lineTo(coreR, 0);
-    ctx.lineTo(0, coreR);
-    ctx.lineTo(-coreR, 0);
-    ctx.closePath();
-    ctx.fill();
+    ctx.fillStyle = payColor;
+    if (pay === 'CRYO') {
+      drawRegularPolygon(ctx, 0, 0, coreR, 6, 0);
+      ctx.fill();
+    } else if (pay === 'CORRODE') {
+      drawRegularPolygon(ctx, 0, 0, coreR * 1.05, 3, -Math.PI / 2);
+      ctx.fill();
+    } else {
+      ctx.beginPath();
+      ctx.moveTo(0, -coreR);
+      ctx.lineTo(coreR, 0);
+      ctx.lineTo(0, coreR);
+      ctx.lineTo(-coreR, 0);
+      ctx.closePath();
+      ctx.fill();
+    }
   } else if (tool === 'OVERCLOCK') {
     ctx.fillStyle = pal.overclockBodyTop;
     ctx.strokeStyle = valid ? pal.overclock : pal.invalidColor;

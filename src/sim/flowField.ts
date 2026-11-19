@@ -21,14 +21,14 @@ export function isPassable(tile: TileKind): boolean {
 }
 
 const ORTHO_DIRS: readonly [number, number][] = [
-  [1, 0],
-  [-1, 0],
   [0, 1],
   [0, -1],
+  [1, 0],
+  [-1, 0],
 ];
 
 /**
- * Floods a Dijkstra / BFS distance map backward from Goal across the 20x12 grid.
+ * Floods a Dijkstra / BFS distance map backward from Goal across the 12x20 grid.
  * O(GridSize) = 240 tiles. Recomputed strictly on tower/node placement or sell.
  */
 export function computeFlowField(
@@ -100,7 +100,7 @@ export function computeFlowField(
         const nd = distances[tileIndex(nx, ny)];
         if (nd === -1) continue;
 
-        const h = Math.abs(goal.x - nx) + Math.abs(goal.y - ny) * 1.001;
+        const h = Math.abs(goal.y - ny) * 1.001 + Math.abs(goal.x - nx);
         if (nd < bestDist || (nd === bestDist && h < bestHeuristic)) {
           bestDist = nd;
           bestDx = dx;

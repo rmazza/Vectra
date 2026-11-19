@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   COSTS,
   ENEMY_ARCHETYPES,
@@ -25,7 +25,7 @@ import {
   TriggerType,
 } from '../sim/types';
 import { ThemePalette } from '../theme/palettes';
-import { ArrowDown, ArrowUp, Plus, Trash2, X } from 'lucide-react';
+import { ArrowDown, ArrowUp, BookmarkPlus, Check, Plus, Trash2, X } from 'lucide-react';
 
 interface InspectorPanelProps {
   hud: HudSnapshot;
@@ -38,6 +38,12 @@ interface InspectorPanelProps {
   ) => void;
   onSetRules: (towerId: string, rules: TargetRule[]) => void;
   onSell: (entityId: string) => void;
+  onSavePreset: (input: {
+    name: string;
+    trigger: TriggerType;
+    payload: PayloadType;
+    modifier: ModifierType;
+  }) => Promise<void>;
   onCloseSelection: () => void;
 }
 
@@ -48,6 +54,7 @@ export const InspectorPanel: React.FC<InspectorPanelProps> = ({
   onUpdateModule,
   onSetRules,
   onSell,
+  onSavePreset,
   onCloseSelection,
 }) => {
   const content = (
@@ -57,6 +64,7 @@ export const InspectorPanel: React.FC<InspectorPanelProps> = ({
       onUpdateModule={onUpdateModule}
       onSetRules={onSetRules}
       onSell={onSell}
+      onSavePreset={onSavePreset}
       onCloseSelection={onCloseSelection}
     />
   );
@@ -102,6 +110,7 @@ interface InspectorBodyProps {
   onUpdateModule: InspectorPanelProps['onUpdateModule'];
   onSetRules: InspectorPanelProps['onSetRules'];
   onSell: InspectorPanelProps['onSell'];
+  onSavePreset: InspectorPanelProps['onSavePreset'];
   onCloseSelection: InspectorPanelProps['onCloseSelection'];
 }
 
@@ -111,8 +120,12 @@ const InspectorBody: React.FC<InspectorBodyProps> = ({
   onUpdateModule,
   onSetRules,
   onSell,
+  onSavePreset,
   onCloseSelection,
 }) => {
+  const [savingOpen, setSavingOpen] = useState(false);
+  const [presetName, setPresetName] = useState('');
+  const [presetSavedFlash, setPresetSavedFlash] = useState(false);
   const ent = hud.selectedEntity;
 
   if (!ent) {
@@ -571,6 +584,83 @@ const InspectorBody: React.FC<InspectorBodyProps> = ({
           <span className="text-[11px] text-[var(--text-muted)]">
             {MODIFIERS[tower.modifier].shortDesc}
           </span>
+        </div>
+
+        {/* Save Tower Loadout as Quick-Buy Preset (SQLite) */}
+        <div className="pt-1">
+          {!savingOpen ? (
+            <button
+              type="button"
+              onClick={() => {
+                const defaultName = `${TRIGGERS[tower.trigger].label} ${PAYLOADS[tower.payload].label}`;
+                setPresetName(defaultName);
+                setSavingOpen(true);
+              }}
+              className="flex min-h-[36px] w-full items-center justify-between rounded-md border border-[var(--border-strong)] bg-[var(--bg-inset)] px-3 py-1.5 text-xs font-medium text-[var(--text-secondary)] transition-colors hover:border-[var(--accent)] hover:text-[var(--text-primary)] cursor-pointer"
+            >
+              <span className="inline-flex items-center gap-1.5">
+                {presetSavedFlash ? (
+                  <Check className="h-3.5 w-3.5 text-[var(--signal-ok)]" />
+                ) : (
+                  <BookmarkPlus className="h-3.5 w-3.5 text-[var(--accent-text)]" />
+                )}
+                {presetSavedFlash ? 'Saved to Quick-Buy Presets' : 'Save Loadout Preset'}
+              </span>
+              <span className="font-mono text-[11px] text-[var(--signal-gold)] tabular-nums">
+                {COSTS.PRESET_TOWER}g
+              </span>
+            </button>
+          ) : (
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                const trimmed = presetName.trim();
+                if (!trimmed) return;
+                await onSavePreset({
+                  name: trimmed,
+                  trigger: tower.trigger,
+                  payload: tower.payload,
+                  modifier: tower.modifier,
+                });
+                setSavingOpen(false);
+                setPresetSavedFlash(true);
+                setTimeout(() => setPresetSavedFlash(false), 2000);
+              }}
+              className="flex flex-col gap-2 rounded-md border border-[var(--accent)]/60 bg-[var(--bg-inset)] p-2.5"
+            >
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="font-medium text-[var(--text-secondary)]">Preset Name</span>
+                <span className="font-mono text-[var(--signal-gold)]">
+                  Quick-buy: {COSTS.PRESET_TOWER}g (+{COSTS.PRESET_PREMIUM}g)
+                </span>
+              </div>
+              <input
+                type="text"
+                maxLength={28}
+                value={presetName}
+                onChange={(e) => setPresetName(e.target.value)}
+                placeholder="e.g. Armor Melter"
+                autoFocus
+                className="min-h-[34px] w-full rounded border border-[var(--border-strong)] bg-[var(--bg-panel)] px-2.5 py-1 text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:border-[var(--accent)] focus:outline-none"
+              />
+              <div className="flex items-center justify-end gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setSavingOpen(false)}
+                  className="rounded border border-[var(--border-subtle)] px-2.5 py-1 text-[11px] text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={!presetName.trim()}
+                  className="rounded bg-[var(--accent)] px-3 py-1 text-[11px] font-bold text-[var(--accent-ink)] hover:bg-[var(--accent-hover)] disabled:opacity-40 cursor-pointer"
+                >
+                  Save Preset
+                </button>
+              </div>
+            </form>
+          )}
         </div>
       </section>
 

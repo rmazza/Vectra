@@ -1,5 +1,5 @@
-export const GRID_COLS = 20;
-export const GRID_ROWS = 12;
+export const GRID_COLS = 12;
+export const GRID_ROWS = 20;
 export const FIXED_HZ = 60;
 export const FIXED_DT = 1 / FIXED_HZ;
 
@@ -29,6 +29,16 @@ export interface TargetRule {
   condition: TargetCondition;
   metric: TargetMetric;
   order: SortOrder;
+}
+
+export interface TowerPreset {
+  id: string;
+  name: string;
+  trigger: TriggerType;
+  payload: PayloadType;
+  modifier: ModifierType;
+  cost: number;
+  createdAt: number;
 }
 
 export type EnemyType = 'SWARM' | 'ARMOR' | 'SHIELDED';

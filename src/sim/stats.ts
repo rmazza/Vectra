@@ -11,6 +11,8 @@ import {
 
 export const COSTS = {
   TOWER: 50,
+  PRESET_TOWER: 65, // +15g quick-buy convenience premium over blank 50g chassis
+  PRESET_PREMIUM: 15,
   OVERCLOCK: 45,
   PRISM: 55,
   MID_WAVE_SWAP: 5, // 10% fee during active wave; free between waves

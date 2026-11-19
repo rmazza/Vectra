@@ -9,6 +9,7 @@ import { TitleScreen } from './components/TitleScreen';
 import { TopHud } from './components/TopHud';
 import { VectraEngine } from './sim/engine';
 import { COSTS } from './sim/stats';
+import { createTowerPreset, deleteTowerPreset, fetchTowerPresets } from './api/presets';
 import {
   BuildTool,
   GamePhase,
@@ -19,6 +20,7 @@ import {
   PayloadType,
   SeedPayload,
   TargetRule,
+  TowerPreset,
   TriggerType,
 } from './sim/types';
 import { MAP_PRESETS } from './sim/waves';
@@ -47,6 +49,8 @@ export default function App() {
   const [phase, setPhase] = useState<GamePhase>('TITLE_MENU');
   const [selectedPreset, setSelectedPreset] = useState<MapPreset>(MAP_PRESETS[0]);
   const [activeTool, setActiveTool] = useState<BuildTool>('TOWER');
+  const [towerPresets, setTowerPresets] = useState<TowerPreset[]>([]);
+  const [activePresetId, setActivePresetId] = useState<string | null>(null);
   const [showFlowField, setShowFlowField] = useState(true);
   const [obstacleEditMode, setObstacleEditMode] = useState(false);
   const [seedModalOpen, setSeedModalOpen] = useState(false);
@@ -55,6 +59,28 @@ export default function App() {
   // Mobile-specific ergonomic state: tap-to-preview before placing & Intel bottom sheet
   const [pendingTile, setPendingTile] = useState<GridPoint | null>(null);
   const [mobileIntelOpen, setMobileIntelOpen] = useState(false);
+
+  useEffect(() => {
+    let mounted = true;
+    fetchTowerPresets()
+      .then((list) => {
+        if (mounted) setTowerPresets(list);
+      })
+      .catch((err) => {
+        console.error('Failed to load saved tower presets:', err);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const activeTowerPreset = useMemo(
+    () =>
+      activeTool === 'TOWER' && activePresetId
+        ? towerPresets.find((p) => p.id === activePresetId) ?? null
+        : null,
+    [activeTool, activePresetId, towerPresets]
+  );
 
   const engineRef = useRef<VectraEngine | null>(null);
   const syncHudRef = useRef<() => void>(() => {});
@@ -107,6 +133,7 @@ export default function App() {
   const handleStartGame = useCallback(() => {
     engine.loadPreset(selectedPreset);
     setActiveTool('TOWER');
+    setActivePresetId(null);
     setObstacleEditMode(false);
     setPendingTile(null);
     setMobileIntelOpen(false);
@@ -118,6 +145,7 @@ export default function App() {
     (seed: SeedPayload) => {
       engine.loadSeed(seed);
       setActiveTool('TOWER');
+      setActivePresetId(null);
       setObstacleEditMode(false);
       setPendingTile(null);
       setMobileIntelOpen(false);
@@ -131,6 +159,7 @@ export default function App() {
     setObstacleEditMode(false);
     setPendingTile(null);
     setMobileIntelOpen(false);
+    setActivePresetId(null);
     setPhase('TITLE_MENU');
     engine.loadDemoBattle(selectedPreset);
     syncHud();
@@ -140,10 +169,30 @@ export default function App() {
     setObstacleEditMode(false);
     setPendingTile(null);
     setMobileIntelOpen(false);
+    setActivePresetId(null);
     engine.resetSimulationState();
     setActiveTool('TOWER');
     syncHud();
   }, [engine, syncHud]);
+
+  const handleSaveTowerPreset = useCallback(
+    async (input: {
+      name: string;
+      trigger: TriggerType;
+      payload: PayloadType;
+      modifier: ModifierType;
+    }) => {
+      const created = await createTowerPreset(input);
+      setTowerPresets((prev) => [created, ...prev.filter((p) => p.id !== created.id)]);
+    },
+    []
+  );
+
+  const handleDeleteTowerPreset = useCallback(async (id: string) => {
+    await deleteTowerPreset(id);
+    setTowerPresets((prev) => prev.filter((p) => p.id !== id));
+    setActivePresetId((curr) => (curr === id ? null : curr));
+  }, []);
 
   const handleToggleMute = useCallback(() => {
     setMuted((prev) => {
@@ -182,7 +231,7 @@ export default function App() {
       if (isTouch) {
         // Touch ergonomics: first tap previews path & range; tapping same tile again places immediately
         if (pendingTile && pendingTile.x === pt.x && pendingTile.y === pt.y) {
-          const placed = engine.placeEntity(pt.x, pt.y, activeTool);
+          const placed = engine.placeEntity(pt.x, pt.y, activeTool, activeTowerPreset);
           if (placed) {
             setPendingTile(null);
             // Keep board clear on mobile after placing so players can quickly chain-build their maze
@@ -198,20 +247,20 @@ export default function App() {
 
       // Desktop mouse click places immediately (hover already showed live preview)
       setPendingTile(null);
-      engine.placeEntity(pt.x, pt.y, activeTool);
+      engine.placeEntity(pt.x, pt.y, activeTool, activeTowerPreset);
     },
-    [phase, engine, obstacleEditMode, activeTool, pendingTile]
+    [phase, engine, obstacleEditMode, activeTool, activeTowerPreset, pendingTile]
   );
 
   const handleConfirmPending = useCallback(() => {
     if (!pendingTile || activeTool === 'INSPECT') return;
-    const placed = engine.placeEntity(pendingTile.x, pendingTile.y, activeTool);
+    const placed = engine.placeEntity(pendingTile.x, pendingTile.y, activeTool, activeTowerPreset);
     if (placed) {
       setPendingTile(null);
       // Deselect immediately after touch build so the mobile bottom sheet doesn't pop up during mazing
       engine.selectEntity(null);
     }
-  }, [engine, pendingTile, activeTool]);
+  }, [engine, pendingTile, activeTool, activeTowerPreset]);
 
   const handleTileRightClick = useCallback(
     (pt: GridPoint) => {
@@ -225,6 +274,7 @@ export default function App() {
       if (existing) {
         engine.selectEntity(existing.id);
       } else if (activeTool !== 'INSPECT') {
+        setActivePresetId(null);
         setActiveTool('INSPECT');
       } else {
         engine.selectEntity(null);
@@ -260,10 +310,12 @@ export default function App() {
 
   const pendingCheck = useMemo(() => {
     if (!pendingTile || activeTool === 'INSPECT') return null;
-    return engine.checkPlacement(pendingTile.x, pendingTile.y, COSTS[activeTool]);
+    const cost =
+      activeTool === 'TOWER' && activeTowerPreset ? activeTowerPreset.cost : COSTS[activeTool];
+    return engine.checkPlacement(pendingTile.x, pendingTile.y, cost);
     // Re-evaluate when hud updates (gold, enemies, wave, or grid changes)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [engine, pendingTile, activeTool, hud]);
+  }, [engine, pendingTile, activeTool, activeTowerPreset, hud]);
 
   // Global keyboard shortcuts
   useEffect(() => {
@@ -287,20 +339,35 @@ export default function App() {
       if (e.key === '1') {
         setObstacleEditMode(false);
         setPendingTile(null);
+        setActivePresetId(null);
         setActiveTool('TOWER');
       } else if (e.key === '2') {
         setObstacleEditMode(false);
         setPendingTile(null);
+        setActivePresetId(null);
         setActiveTool('OVERCLOCK');
       } else if (e.key === '3') {
         setObstacleEditMode(false);
         setPendingTile(null);
+        setActivePresetId(null);
         setActiveTool('PRISM');
+      } else if (e.key === '4' && towerPresets.length > 0) {
+        setObstacleEditMode(false);
+        setPendingTile(null);
+        setActiveTool('TOWER');
+        setActivePresetId((curr) => {
+          if (!curr) return towerPresets[0].id;
+          const idx = towerPresets.findIndex((p) => p.id === curr);
+          return towerPresets[(idx + 1) % towerPresets.length].id;
+        });
       } else if (e.key === 'Escape') {
         if (pendingTile) {
           setPendingTile(null);
         } else if (obstacleEditMode) {
           setObstacleEditMode(false);
+        } else if (activePresetId) {
+          setActivePresetId(null);
+          setActiveTool('INSPECT');
         } else if (activeTool !== 'INSPECT') {
           setActiveTool('INSPECT');
         } else if (engine.selectedEntityId) {
@@ -337,6 +404,8 @@ export default function App() {
     seedModalOpen,
     obstacleEditMode,
     activeTool,
+    activePresetId,
+    towerPresets,
     pendingTile,
     mobileIntelOpen,
     engine,
@@ -413,6 +482,7 @@ export default function App() {
                   engine={engine}
                   palette={palette}
                   activeTool={activeTool}
+                  activePreset={activeTowerPreset}
                   showFlowField={showFlowField}
                   obstacleEditMode={obstacleEditMode}
                   interactive={hud.gameOutcome === 'RUNNING'}
@@ -435,14 +505,26 @@ export default function App() {
                 canEditObstacles={canEditObstacles}
                 obstacleEditMode={obstacleEditMode}
                 mobileIntelOpen={mobileIntelOpen}
+                presets={towerPresets}
+                activePresetId={activePresetId}
                 onSelectTool={(t) => {
                   setObstacleEditMode(false);
                   setMobileIntelOpen(false);
                   setPendingTile(null);
+                  setActivePresetId(null);
                   setActiveTool(t);
                 }}
+                onSelectPreset={(presetId) => {
+                  setObstacleEditMode(false);
+                  setMobileIntelOpen(false);
+                  setPendingTile(null);
+                  setActiveTool('TOWER');
+                  setActivePresetId(presetId);
+                }}
+                onDeletePreset={handleDeleteTowerPreset}
                 onToggleObstacleEdit={() => {
                   setPendingTile(null);
+                  setActivePresetId(null);
                   setObstacleEditMode((v) => !v);
                 }}
                 onToggleMobileIntel={() => {
@@ -461,6 +543,7 @@ export default function App() {
               onUpdateModule={handleUpdateModule}
               onSetRules={handleSetRules}
               onSell={handleSell}
+              onSavePreset={handleSaveTowerPreset}
               onCloseSelection={() => {
                 engine.selectEntity(null);
                 setMobileIntelOpen(false);

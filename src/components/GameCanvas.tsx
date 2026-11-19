@@ -8,7 +8,7 @@ import {
 } from '../renderer/canvasRenderer';
 import { VectraEngine } from '../sim/engine';
 import { COSTS } from '../sim/stats';
-import { BuildTool, FIXED_DT, GridPoint, PlacementCheckResult } from '../sim/types';
+import { BuildTool, FIXED_DT, GridPoint, PlacementCheckResult, TowerPreset } from '../sim/types';
 import { ThemePalette } from '../theme/palettes';
 import { Check, Maximize2, Minus, Play, Plus, X } from 'lucide-react';
 
@@ -16,6 +16,7 @@ interface GameCanvasProps {
   engine: VectraEngine;
   palette: ThemePalette;
   activeTool: BuildTool;
+  activePreset?: TowerPreset | null;
   showFlowField: boolean;
   obstacleEditMode: boolean;
   interactive: boolean;
@@ -40,6 +41,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   engine,
   palette,
   activeTool,
+  activePreset = null,
   showFlowField,
   obstacleEditMode,
   interactive,
@@ -87,6 +89,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   const propsRef = useRef({
     palette,
     activeTool,
+    activePreset,
     showFlowField,
     obstacleEditMode,
     interactive,
@@ -96,6 +99,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   propsRef.current = {
     palette,
     activeTool,
+    activePreset,
     showFlowField,
     obstacleEditMode,
     interactive,
@@ -167,6 +171,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
             hoverTile: propsRef.current.interactive ? hoverTileRef.current : null,
             pendingTile: propsRef.current.interactive ? propsRef.current.pendingTile : null,
             activeTool: propsRef.current.activeTool,
+            activePreset: propsRef.current.activePreset,
             showFlowField: propsRef.current.showFlowField,
             obstacleEditMode: propsRef.current.obstacleEditMode,
             timeSec: now / 1000,
@@ -332,7 +337,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   };
 
   const toolLabel =
-    activeTool === 'TOWER'
+    activeTool === 'TOWER' && activePreset
+      ? `${activePreset.name} · ${activePreset.cost}g`
+      : activeTool === 'TOWER'
       ? `Place Tower · ${COSTS.TOWER}g`
       : activeTool === 'OVERCLOCK'
       ? `Place Overclock · ${COSTS.OVERCLOCK}g`
