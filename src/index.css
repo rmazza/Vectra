@@ -1,0 +1,209 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-display: "Outfit", system-ui, sans-serif;
+  --font-sans: "Plus Jakarta Sans", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+/* ============================================================================
+   VECTRA SIGNATURE PALETTES (Carbon Foundry · Risograph Paper · Vector Radar)
+   ============================================================================ */
+:root,
+[data-theme="foundry"] {
+  --bg-app: #11100E;
+  --bg-panel: #181715;
+  --bg-inset: #11100E;
+  --bg-elevated: #24221E;
+  --bg-hover: #2E2B26;
+  --bg-scrim: rgba(13, 12, 11, 0.82);
+
+  --border-subtle: #2B2823;
+  --border-strong: #403C35;
+
+  --text-primary: #F2EFE9;
+  --text-secondary: #C8C1B4;
+  --text-muted: #928B7E;
+
+  --accent: #D4FF2A;
+  --accent-hover: #E2FF66;
+  --accent-ink: #11100E;
+  --accent-soft: rgba(212, 255, 42, 0.13);
+  --accent-text: #D4FF2A;
+
+  --signal-gold: #F5B841;
+  --signal-gold-soft: rgba(245, 184, 65, 0.14);
+  --signal-danger: #FF4D2E;
+  --signal-danger-soft: rgba(255, 77, 46, 0.14);
+  --signal-danger-text: #FF8770;
+  --signal-ok: #45E6A6;
+  --signal-ok-ink: #0B1912;
+
+  --signal-prism: #B37BFF;
+  --signal-prism-soft: rgba(179, 123, 255, 0.14);
+  --signal-prism-text: #D8B4FE;
+
+  --pay-kinetic: #FF6B35;
+  --pay-cryo: #6BA3FF;
+  --pay-corrode: #C8FF2E;
+
+  --title-grad-0: rgba(17, 16, 14, 0.96);
+  --title-grad-1: rgba(17, 16, 14, 0.85);
+  --title-grad-2: rgba(17, 16, 14, 0.28);
+}
+
+[data-theme="paper"] {
+  --bg-app: #ECE6DA;
+  --bg-panel: #F6F2E9;
+  --bg-inset: #EAE3D5;
+  --bg-elevated: #DDD5C4;
+  --bg-hover: #D4CBB7;
+  --bg-scrim: rgba(24, 23, 21, 0.45);
+
+  --border-subtle: #D5CCB9;
+  --border-strong: #B5AA94;
+
+  --text-primary: #181715;
+  --text-secondary: #3F3C36;
+  --text-muted: #6B655B;
+
+  --accent: #E03A26;
+  --accent-hover: #C82E1C;
+  --accent-ink: #FFFDF9;
+  --accent-soft: rgba(224, 58, 38, 0.11);
+  --accent-text: #C82E1C;
+
+  --signal-gold: #B46900;
+  --signal-gold-soft: rgba(201, 127, 0, 0.13);
+  --signal-danger: #D63222;
+  --signal-danger-soft: rgba(214, 50, 34, 0.11);
+  --signal-danger-text: #B82315;
+  --signal-ok: #0F8C5E;
+  --signal-ok-ink: #FFFFFF;
+
+  --signal-prism: #7C3AED;
+  --signal-prism-soft: rgba(124, 58, 237, 0.1);
+  --signal-prism-text: #6D28D9;
+
+  --pay-kinetic: #D44417;
+  --pay-cryo: #1F5EFF;
+  --pay-corrode: #0F8C5E;
+
+  --title-grad-0: rgba(246, 242, 233, 0.96);
+  --title-grad-1: rgba(246, 242, 233, 0.88);
+  --title-grad-2: rgba(246, 242, 233, 0.22);
+}
+
+[data-theme="phosphor"] {
+  --bg-app: #07110D;
+  --bg-panel: #0B1913;
+  --bg-inset: #060F0B;
+  --bg-elevated: #142B21;
+  --bg-hover: #1B382B;
+  --bg-scrim: rgba(4, 10, 8, 0.84);
+
+  --border-subtle: #183226;
+  --border-strong: #274F3D;
+
+  --text-primary: #E4F5EA;
+  --text-secondary: #B2CEBD;
+  --text-muted: #769985;
+
+  --accent: #39FF88;
+  --accent-hover: #6BFFAA;
+  --accent-ink: #05140C;
+  --accent-soft: rgba(57, 255, 136, 0.13);
+  --accent-text: #39FF88;
+
+  --signal-gold: #FFB020;
+  --signal-gold-soft: rgba(255, 176, 32, 0.14);
+  --signal-danger: #FF4258;
+  --signal-danger-soft: rgba(255, 66, 88, 0.14);
+  --signal-danger-text: #FF8593;
+  --signal-ok: #39FF88;
+  --signal-ok-ink: #05140C;
+
+  --signal-prism: #C278FF;
+  --signal-prism-soft: rgba(194, 120, 255, 0.14);
+  --signal-prism-text: #DEC0FF;
+
+  --pay-kinetic: #FFB020;
+  --pay-cryo: #52D1FF;
+  --pay-corrode: #B8FF2C;
+
+  --title-grad-0: rgba(7, 17, 13, 0.96);
+  --title-grad-1: rgba(7, 17, 13, 0.86);
+  --title-grad-2: rgba(7, 17, 13, 0.28);
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+    height: 100dvh;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    overscroll-behavior: none;
+    background-color: var(--bg-app);
+    color: var(--text-primary);
+    font-family: var(--font-sans);
+    -webkit-tap-highlight-color: transparent;
+  }
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* Custom slim scrollbar for inspector panel */
+.vectra-scroll::-webkit-scrollbar {
+  width: 5px;
+}
+.vectra-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.vectra-scroll::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 3px;
+}
+.vectra-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+.title-scrim {
+  background: linear-gradient(
+    to top,
+    var(--title-grad-0) 0%,
+    var(--title-grad-1) 55%,
+    var(--title-grad-2) 100%
+  );
+}
+
+@media (min-width: 640px) {
+  .title-scrim {
+    background: linear-gradient(
+      to right,
+      var(--title-grad-0) 0%,
+      var(--title-grad-1) 52%,
+      var(--title-grad-2) 100%
+    );
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

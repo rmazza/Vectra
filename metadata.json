@@ -1,0 +1,6 @@
+{
+  "name": "Vectra",
+  "description": "Modular vector tower defense with dynamic flow-field mazing, swappable tower components, adjacency synergies, and programmable targeting logic.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
