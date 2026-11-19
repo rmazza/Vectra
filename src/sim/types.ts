@@ -87,6 +87,7 @@ export interface EnemyEntity {
   angle: number;
   hp: number;
   maxHp: number;
+  displayHp: number;
   shield: number;
   maxShield: number;
   timeSinceDamage: number; // seconds out of combat for shield regen

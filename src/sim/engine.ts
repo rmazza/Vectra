@@ -14,6 +14,7 @@ import {
   computeTowerStats,
 } from './stats';
 import { createRule, evaluateTargeting, getEnemyCurrentSpeed } from './targeting';
+import { VectorParticleSystem } from './particles';
 import {
   ActiveBeam,
   ChainArcFx,
@@ -31,7 +32,6 @@ import {
   MapPreset,
   ModifierType,
   NovaRingFx,
-  ParticleFx,
   PayloadType,
   PlacementCheckResult,
   ProjectileEntity,
@@ -53,7 +53,6 @@ interface PendingSpawn {
 
 const STARTING_GOLD = 210;
 const STARTING_LIVES = 20;
-const MAX_PARTICLES = 220;
 
 export class VectraEngine {
   public grid: TileKind[] = new Array(GRID_COLS * GRID_ROWS).fill('EMPTY');
@@ -74,7 +73,7 @@ export class VectraEngine {
   public chainArcs: ChainArcFx[] = [];
   public splashRings: SplashRingFx[] = [];
   public impactFlashes: ImpactFlashFx[] = [];
-  public particles: ParticleFx[] = [];
+  public readonly particleSystem = new VectorParticleSystem();
   public floatingTexts: FloatingTextFx[] = [];
 
   // Juice
@@ -172,7 +171,7 @@ export class VectraEngine {
     this.chainArcs = [];
     this.splashRings = [];
     this.impactFlashes = [];
-    this.particles = [];
+    this.particleSystem.clear();
     this.floatingTexts = [];
 
     this.tick = 0;
@@ -333,11 +332,12 @@ export class VectraEngine {
     const pal = getActivePalette();
     this.flowField = computeFlowField(this.grid, this.spawn, this.goal);
     this.selectedEntityId = this.demoMode ? null : id;
-    this.spawnBurst(
+    this.particleSystem.emitConstructBurst(
       x + 0.5,
       y + 0.5,
       kind === 'OVERCLOCK' ? pal.overclock : kind === 'PRISM' ? pal.prism : pal.triggers.PULSE,
-      8
+      9,
+      pal
     );
     this.emitSound('BUILD');
     this.notify();
@@ -370,7 +370,7 @@ export class VectraEngine {
       age: 0,
       duration: 0.75,
     });
-    this.spawnBurst(ent.x + 0.5, ent.y + 0.5, pal.sellBurst, 8);
+    this.particleSystem.emitConstructBurst(ent.x + 0.5, ent.y + 0.5, pal.sellBurst, 9, pal);
     this.emitSound('SELL');
     this.notify();
     return true;
@@ -598,6 +598,7 @@ export class VectraEngine {
       angle: 0,
       hp,
       maxHp: hp,
+      displayHp: hp,
       shield,
       maxShield: shield,
       timeSinceDamage: 0,
@@ -632,6 +633,12 @@ export class VectraEngine {
       e.spawnScale = Math.min(1, e.spawnScale + FIXED_DT * 6);
       e.hitFlash = Math.max(0, e.hitFlash - FIXED_DT * 6.5);
       e.shieldFlash = Math.max(0, e.shieldFlash - FIXED_DT * 5.5);
+      if (e.displayHp > e.hp) {
+        const drainRate = Math.max(e.maxHp * 1.15, (e.displayHp - e.hp) * 5.5);
+        e.displayHp = Math.max(e.hp, e.displayHp - drainRate * FIXED_DT);
+      } else {
+        e.displayHp = e.hp;
+      }
       if (e.slowTimer > 0) e.slowTimer = Math.max(0, e.slowTimer - FIXED_DT);
       if (e.shredTimer > 0) e.shredTimer = Math.max(0, e.shredTimer - FIXED_DT);
 
@@ -658,7 +665,7 @@ export class VectraEngine {
           this.triggerShake(0.24, 6);
           this.hitstopTimer = 0.04;
           const pal = getActivePalette();
-          this.spawnBurst(goalCx, goalCy, pal.goalArcLit, 18);
+          this.particleSystem.emitConstructBurst(goalCx, goalCy, pal.goalArcLit, 20, pal);
           this.impactFlashes.push({
             x: goalCx,
             y: goalCy,
@@ -793,7 +800,9 @@ export class VectraEngine {
 
     const muzzleX = tx + (dx / dist) * 0.36;
     const muzzleY = ty + (dy / dist) * 0.36;
-    const payColor = getActivePalette().payloads[tower.payload];
+    const fireAngle = Math.atan2(dy, dx);
+    const pal = getActivePalette();
+    const payColor = pal.payloads[tower.payload];
     const proj: ProjectileEntity = {
       id: `pr_${this.projSeq++}`,
       towerId: tower.id,
@@ -821,6 +830,7 @@ export class VectraEngine {
       duration: 0.1,
       kind: 'MUZZLE',
     });
+    this.particleSystem.emitTowerFire(muzzleX, muzzleY, fireAngle, 'PULSE', tower.payload, pal);
     this.emitSound('PULSE', 0.85);
   }
 
@@ -833,7 +843,8 @@ export class VectraEngine {
     const tx = tower.x + 0.5;
     const ty = tower.y + 0.5;
     const effectiveRange = tower.modifier === 'PIERCE' ? range + 0.55 : range;
-    const color = getActivePalette().payloads[tower.payload];
+    const pal = getActivePalette();
+    const color = pal.payloads[tower.payload];
 
     // Re-collect if Pierce extended Nova radius
     const targets =
@@ -849,9 +860,22 @@ export class VectraEngine {
       duration: 0.32,
       color,
     });
+    this.particleSystem.emitTowerFire(tx, ty, 0, 'NOVA', tower.payload, pal);
 
     for (const e of targets) {
+      const hitShield = e.shield > 0.01;
+      const hitAngle = Math.atan2(e.y - ty, e.x - tx);
       this.applyDamage(e, damage, tower.payload, tower, 1.0);
+      this.particleSystem.emitProjectileHit(
+        e.x,
+        e.y,
+        hitAngle,
+        tower.payload,
+        tower.modifier,
+        pal.enemies[e.type],
+        hitShield,
+        pal
+      );
       if (tower.modifier === 'SPLASH') {
         this.applySplash(e.x, e.y, damage * 0.6, tower.payload, tower, e.id);
       }
@@ -1003,7 +1027,11 @@ export class VectraEngine {
         const armorScale = BASE_TOWER.fireRate / BEAM_TICK_HZ;
 
         for (const c of chosen) {
-          this.applyBeamHit(tower, c, perTargetDmg, armorScale, px, py);
+          this.applyBeamHit(tower, c, perTargetDmg, armorScale, px, py, rampRatio);
+        }
+        if (this.tick % 6 === 0) {
+          const pal = getActivePalette();
+          this.particleSystem.emitTowerFire(px, py, tower.angle, 'BEAM', tower.payload, pal);
         }
       }
       return;
@@ -1052,7 +1080,18 @@ export class VectraEngine {
       tower.beamTickAccum -= tickInterval;
       const tickDmg = (stats.dps * rampMult) / BEAM_TICK_HZ;
       const armorScale = BASE_TOWER.fireRate / BEAM_TICK_HZ;
-      this.applyBeamHit(tower, target, tickDmg, armorScale, tx, ty);
+      this.applyBeamHit(tower, target, tickDmg, armorScale, tx, ty, rampRatio);
+      if (this.tick % 8 === 0) {
+        const pal = getActivePalette();
+        this.particleSystem.emitTowerFire(
+          tx + Math.cos(tower.angle) * 0.34,
+          ty + Math.sin(tower.angle) * 0.34,
+          tower.angle,
+          'BEAM',
+          tower.payload,
+          pal
+        );
+      }
     }
   }
 
@@ -1062,9 +1101,21 @@ export class VectraEngine {
     tickDmg: number,
     armorScale: number,
     originX: number,
-    originY: number
+    originY: number,
+    rampRatio: number
   ): void {
+    const pal = getActivePalette();
+    const hitShield = primary.shield > 0.01;
     this.applyDamage(primary, tickDmg, tower.payload, tower, armorScale);
+    this.particleSystem.emitBeamContact(
+      primary.x,
+      primary.y,
+      Math.atan2(primary.y - originY, primary.x - originX),
+      tower.payload,
+      hitShield ? pal.shieldColor : pal.enemies[primary.type],
+      rampRatio,
+      pal
+    );
 
     if (tower.modifier === 'CHAIN') {
       this.applyChain(primary, tickDmg, tower.payload, tower, armorScale, true);
@@ -1132,8 +1183,31 @@ export class VectraEngine {
         const hitDist = e.radius + 0.16;
         if (Math.hypot(e.x - p.x, e.y - p.y) <= hitDist) {
           p.hitIds.add(e.id);
+          const pal = getActivePalette();
+          const hitShield = e.shield > 0.01;
+          const impactAngle = Math.atan2(p.vy, p.vx);
           const srcTower = this.entities.get(p.towerId) as TowerEntity | undefined;
           this.applyDamage(e, p.damage, p.payload, srcTower, 1.0);
+
+          this.particleSystem.emitProjectileHit(
+            p.x,
+            p.y,
+            impactAngle,
+            p.payload,
+            p.modifier,
+            pal.enemies[e.type],
+            hitShield,
+            pal
+          );
+          this.impactFlashes.push({
+            x: p.x,
+            y: p.y,
+            maxRadius: p.modifier === 'SPLASH' ? 0.52 : 0.34,
+            color: hitShield ? pal.shieldColor : pal.payloads[p.payload],
+            age: 0,
+            duration: 0.12,
+            kind: 'MUZZLE',
+          });
 
           if (p.modifier === 'CHAIN') {
             this.applyChain(e, p.damage, p.payload, srcTower);
@@ -1191,13 +1265,20 @@ export class VectraEngine {
     }
 
     if (points.length > 1) {
+      const pal = getActivePalette();
+      const arcColor = pal.payloads[payload];
       this.chainArcs.push({
         points,
         age: 0,
         duration: quiet ? 0.11 : 0.18,
-        color: getActivePalette().payloads[payload],
+        color: arcColor,
       });
-      if (!quiet) this.emitSound('CHAIN', 0.7);
+      if (!quiet) {
+        for (let k = 1; k < points.length; k++) {
+          this.particleSystem.emitChainSpark(points[k].x, points[k].y, arcColor, pal);
+        }
+        this.emitSound('CHAIN', 0.7);
+      }
     }
   }
 
@@ -1266,8 +1347,9 @@ export class VectraEngine {
 
       if (enemy.shield <= 0.01) {
         enemy.shield = 0;
-        const shieldCol = getActivePalette().shieldColor;
-        this.spawnBurst(enemy.x, enemy.y, shieldCol, 14);
+        const pal = getActivePalette();
+        const shieldCol = pal.shieldColor;
+        this.particleSystem.emitShieldShatter(enemy.x, enemy.y, shieldCol, pal);
         this.impactFlashes.push({
           x: enemy.x,
           y: enemy.y,
@@ -1310,7 +1392,7 @@ export class VectraEngine {
 
         const pal = getActivePalette();
         const enemyColor = pal.enemies[e.type];
-        this.spawnBurst(e.x, e.y, enemyColor, e.type === 'ARMOR' ? 18 : 11);
+        this.particleSystem.emitEnemyKill(e.x, e.y, e.type, enemyColor, pal);
         this.impactFlashes.push({
           x: e.x,
           y: e.y,
@@ -1337,30 +1419,6 @@ export class VectraEngine {
         }
         this.emitSound('KILL', e.type === 'ARMOR' ? 1.0 : 0.7);
       }
-    }
-  }
-
-  private spawnBurst(x: number, y: number, color: string, count: number): void {
-    const shapes: ParticleFx['shape'][] = ['SQUARE', 'TRIANGLE', 'LINE', 'HEX'];
-    for (let i = 0; i < count; i++) {
-      if (this.particles.length >= MAX_PARTICLES) {
-        this.particles.shift();
-      }
-      const angle = Math.random() * Math.PI * 2;
-      const speed = 1.6 + Math.random() * 4.4;
-      this.particles.push({
-        x,
-        y,
-        vx: Math.cos(angle) * speed,
-        vy: Math.sin(angle) * speed,
-        size: 2.4 + Math.random() * 3.8,
-        color,
-        age: 0,
-        duration: 0.26 + Math.random() * 0.3,
-        shape: shapes[i % shapes.length],
-        rotation: Math.random() * Math.PI * 2,
-        vRot: (Math.random() - 0.5) * 14,
-      });
     }
   }
 
@@ -1394,19 +1452,7 @@ export class VectraEngine {
         this.impactFlashes.splice(i, 1);
       }
     }
-    for (let i = this.particles.length - 1; i >= 0; i--) {
-      const p = this.particles[i];
-      p.age += dt;
-      if (p.age >= p.duration) {
-        this.particles.splice(i, 1);
-        continue;
-      }
-      p.x += p.vx * dt;
-      p.y += p.vy * dt;
-      p.vx *= 0.91;
-      p.vy *= 0.91;
-      p.rotation += p.vRot * dt;
-    }
+    this.particleSystem.step(dt);
     for (let i = this.floatingTexts.length - 1; i >= 0; i--) {
       const ft = this.floatingTexts[i];
       ft.age += dt;

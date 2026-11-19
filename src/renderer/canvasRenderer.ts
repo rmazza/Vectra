@@ -11,6 +11,7 @@ import {
   UtilityNodeEntity,
 } from '../sim/types';
 import { ThemePalette, getActivePalette } from '../theme/palettes';
+import { renderVectorParticles } from './particleRenderer';
 
 export interface CameraView {
   zoom: number;
@@ -260,8 +261,14 @@ export function renderVectraCanvas(
     drawEnemy(ctx, e, ts, opts.timeSec, pal);
   }
 
-  // 13. Combat Spectacle Pass (Beams, Chain Lightning, Projectiles, Impact Flashes, Particles)
+  // 13. Combat Spectacle Pass (Beams, Chain Lightning, Projectiles, Impact Flashes)
   drawAdditiveCombatFx(ctx, engine, ts, opts.timeSec, pal);
+
+  // 13.25 Procedural Vector Particle System Pass (Geometric Debris & Velocity-Stretched Sparks)
+  renderVectorParticles(ctx, engine.particleSystem, ts, pal);
+
+  // 13.5 Procedural Vector Enemy Health & Shield Bars (drawn above combat FX for total clarity)
+  drawEnemyHealthBars(ctx, engine, ts, opts.timeSec, pal);
 
   // 14. Crisp floating feedback text
   ctx.font = `700 ${Math.max(9, Math.min(11, Math.round(ts * 0.28)))}px "JetBrains Mono", monospace`;
@@ -1392,29 +1399,169 @@ function drawEnemy(
     ctx.restore();
   }
 
-  // Crisp HP / Shield micro bars
-  const showBar = enemy.hp < enemy.maxHp || enemy.shield > 0;
-  if (showBar) {
-    const bw = Math.max(15, r * 2.3);
-    const bh = 3;
-    const bx = -bw / 2;
-    const by = -r - 9.5;
-
-    ctx.fillStyle = pal.hpBarBg;
-    ctx.fillRect(bx - 1, by - 1, bw + 2, bh + 2);
-
-    const hpPct = Math.max(0, enemy.hp / enemy.maxHp);
-    ctx.fillStyle = hpPct < 0.3 ? pal.hpBarLow : pal.hpBarGood;
-    ctx.fillRect(bx, by, bw * hpPct, bh);
-
-    if (enemy.maxShield > 0 && enemy.shield > 0) {
-      const sp = Math.max(0, enemy.shield / enemy.maxShield);
-      ctx.fillStyle = pal.shieldColor;
-      ctx.fillRect(bx, by - 3.5, bw * sp, 2.2);
-    }
-  }
-
   ctx.restore();
+}
+
+function parseHexRgb(hex: string): [number, number, number] {
+  const clean = hex.replace('#', '');
+  const n = parseInt(clean.length === 3
+    ? clean.split('').map((c) => c + c).join('')
+    : clean, 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+function lerpHexColor(hexA: string, hexB: string, t: number): string {
+  const k = Math.max(0, Math.min(1, t));
+  const [r1, g1, b1] = parseHexRgb(hexA);
+  const [r2, g2, b2] = parseHexRgb(hexB);
+  const r = Math.round(r1 + (r2 - r1) * k);
+  const g = Math.round(g1 + (g2 - g1) * k);
+  const b = Math.round(b1 + (b2 - b1) * k);
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
+/** Smooth procedural Green (100%) -> Yellow (50%) -> Red (0%) health bar color */
+function getHealthBarColor(hpPct: number, pal: ThemePalette): string {
+  const clamped = Math.max(0, Math.min(1, hpPct));
+  if (clamped >= 0.5) {
+    // 1.0 -> 0.5 transitions Green -> Yellow
+    const t = (1 - clamped) * 2;
+    return lerpHexColor(pal.hpBarGood, pal.hpBarMid, t);
+  }
+  // 0.5 -> 0.0 transitions Yellow -> Red
+  const t = (0.5 - clamped) * 2;
+  return lerpHexColor(pal.hpBarMid, pal.hpBarLow, t);
+}
+
+/** Procedural chamfered vector health & shield bars drawn directly on canvas */
+function drawEnemyHealthBars(
+  ctx: CanvasRenderingContext2D,
+  engine: VectraEngine,
+  ts: number,
+  timeSec: number,
+  pal: ThemePalette
+): void {
+  const scale = Math.max(0.72, Math.min(1.25, ts / 40));
+
+  for (const enemy of engine.enemies) {
+    if (enemy.hp <= 0 || enemy.maxHp <= 0) continue;
+
+    const spawnAlpha = Math.max(0, Math.min(1, (enemy.spawnScale - 0.2) / 0.8));
+    if (spawnAlpha <= 0.02) continue;
+
+    const px = enemy.x * ts;
+    const py = enemy.y * ts;
+    const r = Math.max(2, enemy.radius * ts * Math.max(0.1, enemy.spawnScale));
+
+    const hpPct = Math.max(0, Math.min(1, enemy.hp / enemy.maxHp));
+    const trailPct = Math.max(hpPct, Math.min(1, enemy.displayHp / enemy.maxHp));
+    const hasShield = enemy.maxShield > 0 && enemy.shield > 0.01;
+    const shieldPct = hasShield ? Math.max(0, Math.min(1, enemy.shield / enemy.maxShield)) : 0;
+
+    // Archetype-tuned procedural bar geometry
+    const widthMult = enemy.type === 'ARMOR' ? 2.75 : enemy.type === 'SHIELDED' ? 2.55 : 2.3;
+    const bw = Math.max(18 * scale, Math.min(ts * 1.15, r * widthMult));
+    const bh = (enemy.type === 'ARMOR' ? 5.2 : 4.2) * scale;
+    const chamfer = Math.min(bh * 0.42, 2.2);
+    const bx = px - bw / 2;
+    const offsetAbove = hasShield ? r + 10.5 * scale : r + 8.5 * scale;
+    const by = py - offsetAbove - bh;
+
+    const hpColor = getHealthBarColor(hpPct, pal);
+    const isCritical = hpPct <= 0.25;
+    const critPulse = isCritical ? 0.5 + 0.5 * Math.sin(timeSec * 14) : 0;
+
+    ctx.save();
+    ctx.globalAlpha = spawnAlpha;
+
+    // Subtle vector shadow for clean contrast on both dark and light boards
+    ctx.fillStyle = pal.entityShadow;
+    drawChamferRect(ctx, bx - 0.5, by + 0.8, bw + 1.5, bh + 1.2, chamfer);
+    ctx.fill();
+
+    // Recessed chamfered vector casing
+    ctx.fillStyle = pal.hpBarBg;
+    drawChamferRect(ctx, bx - 1, by - 1, bw + 2, bh + 2, chamfer + 0.6);
+    ctx.fill();
+
+    // Clipped inner vector channel so shrinking fills respect chamfered corners cleanly
+    ctx.save();
+    drawChamferRect(ctx, bx, by, bw, bh, Math.max(0.8, chamfer - 0.4));
+    ctx.clip();
+
+    // Trailing damage-drain ghost bar (reveals burst chunks smoothly shrinking away)
+    if (trailPct > hpPct + 0.005) {
+      ctx.fillStyle = pal.hpBarTrail;
+      ctx.globalAlpha = spawnAlpha * (pal.isLight ? 0.88 : 0.82);
+      ctx.fillRect(bx, by, bw * trailPct, bh);
+      ctx.globalAlpha = spawnAlpha;
+    }
+
+    // Active dynamic HP fill (Green -> Yellow -> Red)
+    const fillW = bw * hpPct;
+    if (fillW > 0.3) {
+      ctx.fillStyle = hpColor;
+      ctx.fillRect(bx, by, fillW, bh);
+
+      // Crisp 1px top vector highlight bevel
+      ctx.fillStyle = pal.isLight ? 'rgba(255, 255, 255, 0.34)' : 'rgba(255, 255, 255, 0.28)';
+      ctx.fillRect(bx, by, fillW, Math.max(1, bh * 0.26));
+
+      // Bright leading-edge cut line when partially depleted
+      if (hpPct < 0.995) {
+        ctx.fillStyle = '#FFFFFF';
+        ctx.globalAlpha = spawnAlpha * (pal.isLight ? 0.65 : 0.8);
+        ctx.fillRect(bx + fillW - 1.1, by, 1.1, bh);
+        ctx.globalAlpha = spawnAlpha;
+      }
+    }
+
+    // Procedural segment notch dividers for high-HP archetypes
+    const segments = enemy.type === 'ARMOR' ? 4 : enemy.type === 'SHIELDED' ? 2 : 0;
+    if (segments > 1) {
+      ctx.fillStyle = pal.hpBarBg;
+      ctx.globalAlpha = spawnAlpha * 0.7;
+      for (let s = 1; s < segments; s++) {
+        const sx = bx + (bw * s) / segments;
+        ctx.fillRect(sx - 0.5, by, 1, bh);
+      }
+      ctx.globalAlpha = spawnAlpha;
+    }
+
+    ctx.restore();
+
+    // Vector frame stroke (pulses red on critical HP <= 25%)
+    ctx.strokeStyle = isCritical
+      ? pal.hpBarLow
+      : enemy.hitFlash > 0.2
+      ? pal.enemyHitFlash
+      : pal.hpBarBorder;
+    ctx.lineWidth = isCritical ? 1.15 + critPulse * 0.55 : 0.9;
+    drawChamferRect(ctx, bx - 0.6, by - 0.6, bw + 1.2, bh + 1.2, chamfer + 0.3);
+    ctx.stroke();
+
+    // Stacked chamfered vector Shield bar directly above HP bar
+    if (hasShield) {
+      const sh = 2.6 * scale;
+      const sy = by - sh - 2.1 * scale;
+      const sChamfer = Math.min(sh * 0.45, 1.4);
+
+      ctx.fillStyle = pal.hpBarBg;
+      drawChamferRect(ctx, bx - 0.8, sy - 0.8, bw + 1.6, sh + 1.6, sChamfer + 0.4);
+      ctx.fill();
+
+      ctx.save();
+      drawChamferRect(ctx, bx, sy, bw, sh, Math.max(0.6, sChamfer - 0.3));
+      ctx.clip();
+      ctx.fillStyle = enemy.shieldFlash > 0.18 ? pal.enemyHitFlash : pal.shieldColor;
+      ctx.fillRect(bx, sy, bw * shieldPct, sh);
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.35)';
+      ctx.fillRect(bx, sy, bw * shieldPct, Math.max(0.8, sh * 0.3));
+      ctx.restore();
+    }
+
+    ctx.restore();
+  }
 }
 
 /** High-energy combat rendering pass: Beams, Forked Chain Lightning, Comet Projectiles, Impact Shockwaves, Spark Particles */
@@ -1608,40 +1755,6 @@ function drawAdditiveCombatFx(
         drawRadialGlow(ctx, cx, cy, rad * 0.65, fx.color);
       }
     }
-  }
-
-  // 5. Geometric Spark & Shard Particles
-  for (const pt of engine.particles) {
-    const alpha = Math.max(0, Math.min(1, 1 - pt.age / Math.max(0.001, pt.duration)));
-    const s = Math.max(0.5, pt.size * (0.35 + 0.65 * alpha) * Math.max(0.65, ts / 42));
-    ctx.save();
-    ctx.translate(pt.x * ts, pt.y * ts);
-    ctx.rotate(pt.rotation);
-    ctx.globalAlpha = alpha * 0.95;
-    ctx.fillStyle = pt.color;
-    ctx.strokeStyle = pt.color;
-
-    if (pt.shape === 'SQUARE') {
-      ctx.fillRect(-s / 2, -s / 2, s, s);
-    } else if (pt.shape === 'TRIANGLE') {
-      ctx.beginPath();
-      ctx.moveTo(0, -s);
-      ctx.lineTo(s * 0.85, s * 0.7);
-      ctx.lineTo(-s * 0.85, s * 0.7);
-      ctx.closePath();
-      ctx.fill();
-    } else if (pt.shape === 'HEX') {
-      ctx.lineWidth = 1.4;
-      drawRegularPolygon(ctx, 0, 0, s * 0.8, 6, 0);
-      ctx.stroke();
-    } else {
-      ctx.lineWidth = 1.7;
-      ctx.beginPath();
-      ctx.moveTo(-s * 1.4, 0);
-      ctx.lineTo(s * 1.4, 0);
-      ctx.stroke();
-    }
-    ctx.restore();
   }
 
   ctx.restore();

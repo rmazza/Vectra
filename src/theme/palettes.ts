@@ -101,8 +101,11 @@ export interface ThemePalette {
   slowStatus: string;
   shredStatus: string;
   hpBarBg: string;
+  hpBarBorder: string;
   hpBarGood: string;
+  hpBarMid: string;
   hpBarLow: string;
+  hpBarTrail: string;
   beamCore: string;
   beamFloorGlow: string;
   beamRelayFloorGlow: string;
@@ -250,9 +253,12 @@ export const PALETTES: Record<ThemeId, ThemePalette> = {
     shieldGlow: 'rgba(107, 163, 255, 0.24)',
     slowStatus: '#6BA3FF',
     shredStatus: '#C8FF2E',
-    hpBarBg: 'rgba(13, 12, 11, 0.9)',
-    hpBarGood: '#45E6A6',
-    hpBarLow: '#FF4D2E',
+    hpBarBg: 'rgba(13, 12, 11, 0.92)',
+    hpBarBorder: 'rgba(242, 239, 233, 0.28)',
+    hpBarGood: '#2EE67B',
+    hpBarMid: '#FACC15',
+    hpBarLow: '#FF3B30',
+    hpBarTrail: '#FFF3C4',
 
     beamCore: '#FFFDF7',
     beamFloorGlow: 'rgba(255, 107, 53, 0.2)',
@@ -397,9 +403,12 @@ export const PALETTES: Record<ThemeId, ThemePalette> = {
     shieldGlow: 'rgba(31, 94, 255, 0.16)',
     slowStatus: '#1F5EFF',
     shredStatus: '#0F8C5E',
-    hpBarBg: 'rgba(24, 23, 21, 0.85)',
-    hpBarGood: '#0F8C5E',
-    hpBarLow: '#E03A26',
+    hpBarBg: 'rgba(24, 23, 21, 0.88)',
+    hpBarBorder: 'rgba(24, 23, 21, 0.72)',
+    hpBarGood: '#16A34A',
+    hpBarMid: '#EAB308',
+    hpBarLow: '#DC2626',
+    hpBarTrail: '#FEF08A',
 
     beamCore: '#FFFFFF',
     beamFloorGlow: 'rgba(224, 58, 38, 0.14)',
@@ -544,9 +553,12 @@ export const PALETTES: Record<ThemeId, ThemePalette> = {
     shieldGlow: 'rgba(82, 209, 255, 0.22)',
     slowStatus: '#52D1FF',
     shredStatus: '#B8FF2C',
-    hpBarBg: 'rgba(5, 12, 9, 0.9)',
+    hpBarBg: 'rgba(5, 12, 9, 0.94)',
+    hpBarBorder: 'rgba(134, 239, 172, 0.3)',
     hpBarGood: '#39FF88',
-    hpBarLow: '#FF4258',
+    hpBarMid: '#FFE033',
+    hpBarLow: '#FF3B4E',
+    hpBarTrail: '#FEF9C3',
 
     beamCore: '#F5FFF9',
     beamFloorGlow: 'rgba(57, 255, 136, 0.18)',
