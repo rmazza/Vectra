@@ -1,10 +1,21 @@
 import { VectraEngine } from '../sim/engine';
 import { tileIndex } from '../sim/flowField';
-import { COSTS, PRISM_RADIUS, TRIGGERS, computeTowerStats } from '../sim/stats';
+import {
+  COSTS,
+  FLOOR_STATS,
+  PRISM_RADIUS,
+  TRIGGERS,
+  computeTowerStats,
+  dirToVector,
+  isFloorKind,
+} from '../sim/stats';
 import {
   BuildTool,
+  CardinalDir,
+  FloorEntity,
   GRID_COLS,
   GRID_ROWS,
+  GridEntity,
   GridPoint,
   PlacementCheckResult,
   TowerEntity,
@@ -25,7 +36,9 @@ export interface RenderOptions {
   pendingTile: GridPoint | null;
   activeTool: BuildTool;
   activePreset?: TowerPreset | null;
+  conveyorDir?: CardinalDir;
   showFlowField: boolean;
+  showHeatmap?: boolean;
   obstacleEditMode: boolean;
   timeSec: number;
   camera: CameraView;
@@ -194,6 +207,11 @@ export function renderVectraCanvas(
   // 2. Reactive ambient floor lighting pools
   drawFloorLighting(ctx, engine, ts, opts.timeSec, pal);
 
+  // 2.5 Diagnostic Cumulative Damage Heatmap Layer
+  if (opts.showHeatmap) {
+    drawDamageHeatmap(ctx, engine, ts, opts.timeSec, pal);
+  }
+
   // 3. Flow Field vector overlay
   if (opts.showFlowField && ts >= 16) {
     drawFlowFieldVectors(ctx, engine, ts, pal);
@@ -235,6 +253,18 @@ export function renderVectraCanvas(
     engine.lives / engine.maxLives,
     pal
   );
+
+  // 6.5 Walkable Tactical Floor Tiles (drawn under conduits, towers & enemies)
+  for (const ent of engine.entities.values()) {
+    const isSelected = ent.id === engine.selectedEntityId;
+    if (ent.kind === 'STASIS') {
+      drawStasisPad(ctx, ent, ts, isSelected, opts.timeSec, pal);
+    } else if (ent.kind === 'CONVEYOR') {
+      drawConveyorStrip(ctx, ent, ts, isSelected, opts.timeSec, pal);
+    } else if (ent.kind === 'MINE') {
+      drawPulseMine(ctx, ent, ts, isSelected, opts.timeSec, pal);
+    }
+  }
 
   // 7. Synergy tethers (Overclock conduits & Prism optical relays)
   drawSynergyConduits(ctx, engine, ts, opts.timeSec, pal);
@@ -305,6 +335,11 @@ export function renderVectraCanvas(
       Boolean(opts.pendingTile),
       pal
     );
+  }
+
+  // 15.5 Diagnostic Heatmap Tile Values & Hover Damage Probe
+  if (opts.showHeatmap) {
+    drawHeatmapAnnotations(ctx, engine, ts, opts.timeSec, engine.demoMode ? null : previewTile, opts, pal);
   }
 
   // Crisp outer architectural frame with corner accent ticks
@@ -384,6 +419,32 @@ function drawFloorLighting(
       );
     } else if (ent.kind === 'TOWER') {
       drawRadialGlow(ctx, cx, cy, ts * 1.15, pal.payloadFloorGlows[ent.payload]);
+    } else if (ent.kind === 'STASIS') {
+      drawRadialGlow(
+        ctx,
+        cx,
+        cy,
+        ts * (1.35 + ent.activePulse * 0.35),
+        pal.payloadFloorGlows.CRYO
+      );
+    } else if (ent.kind === 'CONVEYOR') {
+      if (ent.activePulse > 0.08) {
+        drawRadialGlow(
+          ctx,
+          cx,
+          cy,
+          ts * (1.05 + ent.activePulse * 0.45),
+          pal.validFill
+        );
+      }
+    } else if (ent.kind === 'MINE' && ent.cooldown <= 0) {
+      drawRadialGlow(
+        ctx,
+        cx,
+        cy,
+        ts * (1.05 + ent.activePulse * 0.25),
+        pal.payloadFloorGlows[ent.payload]
+      );
     }
   }
 
@@ -391,6 +452,240 @@ function drawFloorLighting(
   for (const b of engine.activeBeams) {
     const c = b.isRelay ? pal.beamRelayFloorGlow : pal.beamFloorGlow;
     drawRadialGlow(ctx, b.toX * ts, b.toY * ts, ts * (0.65 + b.rampRatio * 0.45), c);
+  }
+
+  ctx.restore();
+}
+
+function sampleHeatmapRgb(t: number, isLight: boolean): [number, number, number] {
+  const clamped = Math.max(0, Math.min(1, t));
+  const stops: ReadonlyArray<[number, number, number, number]> = isLight
+    ? [
+        [0.0, 37, 99, 235],
+        [0.32, 13, 148, 136],
+        [0.62, 217, 119, 6],
+        [0.85, 220, 38, 38],
+        [1.0, 153, 27, 27],
+      ]
+    : [
+        [0.0, 36, 124, 255],
+        [0.3, 45, 224, 158],
+        [0.58, 226, 245, 58],
+        [0.82, 255, 146, 36],
+        [1.0, 255, 58, 44],
+      ];
+
+  for (let i = 0; i < stops.length - 1; i++) {
+    const [p0, r0, g0, b0] = stops[i];
+    const [p1, r1, g1, b1] = stops[i + 1];
+    if (clamped <= p1) {
+      const u = p1 > p0 ? (clamped - p0) / (p1 - p0) : 0;
+      return [
+        Math.round(r0 + (r1 - r0) * u),
+        Math.round(g0 + (g1 - g0) * u),
+        Math.round(b0 + (b1 - b0) * u),
+      ];
+    }
+  }
+  const last = stops[stops.length - 1];
+  return [last[1], last[2], last[3]];
+}
+
+function formatCompactDamage(dmg: number): string {
+  const n = Math.round(dmg);
+  if (n >= 100000) return `${Math.round(n / 1000)}k`;
+  if (n >= 10000) return `${(n / 1000).toFixed(1)}k`;
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return String(n);
+}
+
+function drawDamageHeatmap(
+  ctx: CanvasRenderingContext2D,
+  engine: VectraEngine,
+  ts: number,
+  timeSec: number,
+  pal: ThemePalette
+): void {
+  const maxDmg = engine.maxTileDamage;
+  if (maxDmg <= 0.01) return;
+
+  ctx.save();
+
+  // Pass 1: Soft thermal bloom across medium/high killzones for organic continuity
+  ctx.save();
+  ctx.globalCompositeOperation = pal.isLight ? 'source-over' : 'lighter';
+  for (let y = 0; y < GRID_ROWS; y++) {
+    for (let x = 0; x < GRID_COLS; x++) {
+      const dmg = engine.tileDamage[tileIndex(x, y)];
+      if (dmg <= 0) continue;
+      const rawRatio = dmg / maxDmg;
+      if (rawRatio < 0.12) continue;
+      const heat = Math.pow(rawRatio, 0.65);
+      const [r, g, b] = sampleHeatmapRgb(heat, pal.isLight);
+      const alpha = (pal.isLight ? 0.14 : 0.18) + heat * (pal.isLight ? 0.18 : 0.24);
+      drawRadialGlow(
+        ctx,
+        (x + 0.5) * ts,
+        (y + 0.5) * ts,
+        ts * (0.9 + heat * 0.45),
+        `rgba(${r}, ${g}, ${b}, ${alpha.toFixed(3)})`
+      );
+    }
+  }
+  ctx.restore();
+
+  // Pass 2: Crisp per-tile thermal fills & peak hotspot reticles
+  const peakPulse = 0.5 + 0.5 * Math.sin(timeSec * 4.5);
+  for (let y = 0; y < GRID_ROWS; y++) {
+    for (let x = 0; x < GRID_COLS; x++) {
+      const idx = tileIndex(x, y);
+      const dmg = engine.tileDamage[idx];
+      if (dmg <= 0) continue;
+
+      const rawRatio = dmg / maxDmg;
+      const heat = Math.pow(rawRatio, 0.65);
+      const [r, g, b] = sampleHeatmapRgb(heat, pal.isLight);
+      const px = x * ts;
+      const py = y * ts;
+
+      const fillAlpha = pal.isLight
+        ? 0.14 + heat * 0.46
+        : 0.16 + heat * 0.48;
+      ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${fillAlpha.toFixed(3)})`;
+      ctx.fillRect(px + 1, py + 1, ts - 2, ts - 2);
+
+      if (heat >= 0.35) {
+        const strokeAlpha = 0.28 + heat * 0.55;
+        ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${strokeAlpha.toFixed(3)})`;
+        ctx.lineWidth = rawRatio >= 0.92 ? 1.8 : 1;
+        ctx.strokeRect(px + 1.5, py + 1.5, ts - 3, ts - 3);
+      }
+
+      // Highlight top killbox tile(s) with crisp animated corner ticks
+      if (rawRatio >= 0.92) {
+        const tick = Math.max(4, ts * 0.2);
+        const inset = 2.5;
+        ctx.strokeStyle = pal.isLight
+          ? `rgba(153, 27, 27, ${(0.72 + peakPulse * 0.28).toFixed(2)})`
+          : `rgba(255, 240, 210, ${(0.68 + peakPulse * 0.32).toFixed(2)})`;
+        ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        ctx.moveTo(px + inset, py + inset + tick);
+        ctx.lineTo(px + inset, py + inset);
+        ctx.lineTo(px + inset + tick, py + inset);
+        ctx.moveTo(px + ts - inset - tick, py + inset);
+        ctx.lineTo(px + ts - inset, py + inset);
+        ctx.lineTo(px + ts - inset, py + inset + tick);
+        ctx.moveTo(px + ts - inset, py + ts - inset - tick);
+        ctx.lineTo(px + ts - inset, py + ts - inset);
+        ctx.lineTo(px + ts - inset - tick, py + ts - inset);
+        ctx.moveTo(px + inset + tick, py + ts - inset);
+        ctx.lineTo(px + inset, py + ts - inset);
+        ctx.lineTo(px + inset, py + ts - inset - tick);
+        ctx.stroke();
+      }
+    }
+  }
+
+  ctx.restore();
+}
+
+function drawHeatmapAnnotations(
+  ctx: CanvasRenderingContext2D,
+  engine: VectraEngine,
+  ts: number,
+  _timeSec: number,
+  hoverTile: GridPoint | null,
+  opts: RenderOptions,
+  pal: ThemePalette
+): void {
+  const maxDmg = engine.maxTileDamage;
+  ctx.save();
+
+  // Compact inline numeric values on hot walkable tiles
+  if (maxDmg > 0.01 && ts >= 24) {
+    const fontSize = Math.max(8, Math.min(10, Math.round(ts * 0.27)));
+    ctx.font = `700 ${fontSize}px "JetBrains Mono", monospace`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    for (let y = 0; y < GRID_ROWS; y++) {
+      for (let x = 0; x < GRID_COLS; x++) {
+        const idx = tileIndex(x, y);
+        const dmg = engine.tileDamage[idx];
+        if (dmg <= 0) continue;
+        const rawRatio = dmg / maxDmg;
+        if (rawRatio < 0.14) continue;
+
+        const kind = engine.grid[idx];
+        // Skip blocking structures so tower/node art stays uncluttered
+        if (kind === 'TOWER' || kind === 'OVERCLOCK' || kind === 'PRISM' || kind === 'OBSTACLE') {
+          continue;
+        }
+
+        const label = formatCompactDamage(dmg);
+        const cx = (x + 0.5) * ts;
+        const cy = (y + 0.5) * ts;
+
+        const tw = ctx.measureText(label).width + 5;
+        const th = fontSize + 4;
+        ctx.fillStyle = pal.isLight ? 'rgba(246, 242, 233, 0.82)' : 'rgba(13, 12, 11, 0.72)';
+        ctx.fillRect(cx - tw / 2, cy - th / 2, tw, th);
+
+        ctx.fillStyle =
+          rawRatio >= 0.85
+            ? pal.isLight
+              ? '#991B1B'
+              : '#FFE8C2'
+            : pal.isLight
+            ? '#181715'
+            : '#F2EFE9';
+        ctx.fillText(label, cx, cy + 0.5);
+      }
+    }
+  }
+
+  // Diagnostic tile hover probe (shows exact cumulative damage & share of peak)
+  if (hoverTile && !opts.pendingTile) {
+    const hx = hoverTile.x;
+    const hy = hoverTile.y;
+    const idx = tileIndex(hx, hy);
+    const dmg = Math.round(engine.tileDamage[idx]);
+    const pct = maxDmg > 0 ? Math.round((engine.tileDamage[idx] / maxDmg) * 100) : 0;
+    const tag =
+      dmg > 0
+        ? `(${hx},${hy}) · ${dmg.toLocaleString()} dmg · ${pct}% peak`
+        : `(${hx},${hy}) · 0 dmg`;
+
+    ctx.font = '600 10px "JetBrains Mono", monospace';
+    const tw = ctx.measureText(tag).width + 12;
+    const th = 19;
+    const cx = (hx + 0.5) * ts;
+    const py = hy * ts;
+    // Place below tile when hovered near top or when invalid-placement tooltip sits above
+    const lx = Math.max(4, Math.min(GRID_COLS * ts - tw - 4, cx - tw / 2));
+    const preferBelow = py < 34 || opts.activeTool !== 'INSPECT';
+    const ly = preferBelow
+      ? Math.min(GRID_ROWS * ts - th - 4, py + ts + 6)
+      : Math.max(4, py - th - 6);
+
+    const [r, g, b] =
+      dmg > 0
+        ? sampleHeatmapRgb(Math.pow(engine.tileDamage[idx] / Math.max(1, maxDmg), 0.65), pal.isLight)
+        : pal.isLight
+        ? [107, 101, 91]
+        : [146, 139, 126];
+
+    ctx.fillStyle = pal.tooltipBg;
+    ctx.strokeStyle = `rgb(${r}, ${g}, ${b})`;
+    ctx.lineWidth = 1.2;
+    ctx.fillRect(lx, ly, tw, th);
+    ctx.strokeRect(lx, ly, tw, th);
+
+    ctx.fillStyle = pal.isLight ? '#181715' : '#F2EFE9';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(tag, lx + tw / 2, ly + th / 2 + 0.5);
   }
 
   ctx.restore();
@@ -440,7 +735,7 @@ function getPlacementCheck(
     opts.activeTool === 'TOWER' && opts.activePreset
       ? opts.activePreset.cost
       : COSTS[opts.activeTool];
-  return engine.checkPlacement(tile.x, tile.y, cost);
+  return engine.checkPlacement(tile.x, tile.y, cost, isFloorKind(opts.activeTool));
 }
 
 /** 2.5D beveled architectural monolith obstacle */
@@ -724,6 +1019,253 @@ function drawGoalTile(
   ctx.restore();
 }
 
+function drawStasisPad(
+  ctx: CanvasRenderingContext2D,
+  pad: FloorEntity,
+  ts: number,
+  isSelected: boolean,
+  timeSec: number,
+  pal: ThemePalette
+): void {
+  const cx = (pad.x + 0.5) * ts;
+  const cy = (pad.y + 0.5) * ts;
+  const half = Math.max(4, ts * 0.44);
+  const cryo = pal.payloads.CRYO;
+  const spinBoost = pad.activePulse > 0.08 ? 2.4 : 1;
+
+  ctx.save();
+  ctx.translate(cx, cy);
+
+  // Recessed chamfered floor plate
+  ctx.fillStyle = pal.towerSocketFill;
+  ctx.strokeStyle = isSelected ? pal.towerBorderSelected : cryo;
+  ctx.lineWidth = isSelected ? 2.1 : 1.25;
+  ctx.globalAlpha = isSelected ? 1 : 0.85;
+  drawChamferRect(ctx, -half, -half, half * 2, half * 2, ts * 0.14);
+  ctx.fill();
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+
+  // Inner gravity well wash
+  drawRadialGlow(
+    ctx,
+    0,
+    0,
+    half * 0.95,
+    pal.isLight ? 'rgba(14, 165, 233, 0.14)' : 'rgba(56, 189, 248, 0.22)'
+  );
+
+  // Outer rotating dashed containment ring
+  ctx.save();
+  ctx.rotate(-timeSec * 0.9 * spinBoost);
+  ctx.strokeStyle = cryo;
+  ctx.globalAlpha = 0.55 + pad.activePulse * 0.35;
+  ctx.lineWidth = 1.35;
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath();
+  ctx.arc(0, 0, half * 0.74, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+
+  // Inner counter-rotating gravity spiral ring
+  ctx.save();
+  ctx.rotate(timeSec * 1.55 * spinBoost);
+  ctx.strokeStyle = pal.prism;
+  ctx.globalAlpha = 0.6 + pad.activePulse * 0.35;
+  ctx.lineWidth = 1.25;
+  ctx.setLineDash([3, 3]);
+  ctx.beginPath();
+  ctx.arc(0, 0, half * 0.44, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+
+  // 4 inward corner gravity ticks (visual affordance of pull)
+  ctx.strokeStyle = cryo;
+  ctx.globalAlpha = 0.72;
+  ctx.lineWidth = 1.2;
+  for (let i = 0; i < 4; i++) {
+    ctx.save();
+    ctx.rotate((i * Math.PI) / 2 + Math.PI / 4);
+    ctx.beginPath();
+    ctx.moveTo(half * 0.84, 0);
+    ctx.lineTo(half * 0.62, 0);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // Pulsing singularity nucleus
+  const corePulse = 0.5 + 0.5 * Math.sin(timeSec * 4.2);
+  ctx.fillStyle = cryo;
+  ctx.globalAlpha = 0.85;
+  ctx.beginPath();
+  ctx.arc(0, 0, Math.max(1.8, ts * (0.075 + corePulse * 0.02 + pad.activePulse * 0.03)), 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = pal.towerCoreSpec;
+  ctx.globalAlpha = 0.9;
+  ctx.beginPath();
+  ctx.arc(0, 0, Math.max(1, ts * 0.032), 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function drawConveyorStrip(
+  ctx: CanvasRenderingContext2D,
+  conv: FloorEntity,
+  ts: number,
+  isSelected: boolean,
+  timeSec: number,
+  pal: ThemePalette
+): void {
+  const cx = (conv.x + 0.5) * ts;
+  const cy = (conv.y + 0.5) * ts;
+  const half = Math.max(4, ts * 0.44);
+  const { angle } = dirToVector(conv.direction);
+  const accent = pal.validColor;
+
+  ctx.save();
+  ctx.translate(cx, cy);
+
+  // Recessed floor channel
+  ctx.fillStyle = pal.towerSocketFill;
+  ctx.strokeStyle = isSelected ? pal.towerBorderSelected : accent;
+  ctx.lineWidth = isSelected ? 2.1 : 1.2;
+  ctx.globalAlpha = isSelected ? 1 : 0.82;
+  ctx.fillRect(-half, -half, half * 2, half * 2);
+  ctx.strokeRect(-half, -half, half * 2, half * 2);
+  ctx.globalAlpha = 1;
+
+  // Rotate interior track to face push direction (+X is forward)
+  ctx.rotate(angle);
+
+  // Subtle side guide rails along travel axis
+  ctx.strokeStyle = pal.towerSocketStroke;
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.moveTo(-half + 3, -half * 0.68);
+  ctx.lineTo(half - 3, -half * 0.68);
+  ctx.moveTo(-half + 3, half * 0.68);
+  ctx.lineTo(half - 3, half * 0.68);
+  ctx.stroke();
+
+  // 3 animated scrolling directional vector chevrons
+  const chevH = half * 0.44;
+  const chevW = half * 0.28;
+  const speed = 1.45 + conv.activePulse * 2.0;
+  for (let i = 0; i < 3; i++) {
+    const phase = (timeSec * speed + i / 3) % 1;
+    const xPos = -half * 0.62 + phase * half * 1.24;
+    // Fade cleanly at entry and exit edges
+    const edgeFade = Math.sin(phase * Math.PI);
+    ctx.strokeStyle = conv.activePulse > 0.25 && !pal.isLight ? pal.beamCore : accent;
+    ctx.globalAlpha = Math.max(0.18, edgeFade * (0.68 + conv.activePulse * 0.32));
+    ctx.lineWidth = 1.65 + conv.activePulse * 0.7;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    ctx.moveTo(xPos - chevW, -chevH);
+    ctx.lineTo(xPos + chevW * 0.45, 0);
+    ctx.lineTo(xPos - chevW, chevH);
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+function drawPulseMine(
+  ctx: CanvasRenderingContext2D,
+  mine: FloorEntity,
+  ts: number,
+  isSelected: boolean,
+  timeSec: number,
+  pal: ThemePalette
+): void {
+  const cx = (mine.x + 0.5) * ts;
+  const cy = (mine.y + 0.5) * ts;
+  const r = Math.max(4, ts * 0.4);
+  const payColor = pal.payloads[mine.payload];
+  const armed = mine.cooldown <= 0;
+  const pulse = 0.5 + 0.5 * Math.sin(timeSec * 5.0);
+
+  ctx.save();
+  ctx.translate(cx, cy);
+
+  // Recessed armored octagonal floor hatch
+  ctx.fillStyle = pal.towerSocketFill;
+  ctx.strokeStyle = isSelected ? pal.towerBorderSelected : armed ? payColor : pal.towerSocketStroke;
+  ctx.lineWidth = isSelected ? 2.1 : armed ? 1.4 : 1.1;
+  drawRegularPolygon(ctx, 0, 0, r, 8, Math.PI / 8);
+  ctx.fill();
+  ctx.stroke();
+
+  // Inner housing plate
+  ctx.fillStyle = pal.towerBodyMid;
+  ctx.globalAlpha = armed ? 0.92 : 0.55;
+  drawRegularPolygon(ctx, 0, 0, r * 0.68, 8, Math.PI / 8);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+
+  if (armed) {
+    // Armed pulsing trigger ring
+    ctx.strokeStyle = payColor;
+    ctx.globalAlpha = 0.4 + pulse * 0.45;
+    ctx.lineWidth = 1.25;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.arc(0, 0, r * 0.82, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
+  } else {
+    // Radial recharge sweep arc
+    const progress = Math.max(0, Math.min(1, 1 - mine.cooldown / Math.max(0.1, mine.maxCooldown)));
+    ctx.strokeStyle = pal.towerSocketStroke;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(0, 0, r * 0.78, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.strokeStyle = payColor;
+    ctx.globalAlpha = 0.85;
+    ctx.lineWidth = 2.1;
+    ctx.beginPath();
+    ctx.arc(0, 0, r * 0.78, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * progress);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  // Payload core emblem (matching tower payload geometry)
+  const coreR = ts * (armed ? 0.145 + pulse * 0.015 : 0.105);
+  ctx.fillStyle = payColor;
+  ctx.globalAlpha = armed ? 0.96 : 0.36;
+  if (mine.payload === 'KINETIC') {
+    ctx.beginPath();
+    ctx.moveTo(0, -coreR);
+    ctx.lineTo(coreR, 0);
+    ctx.lineTo(0, coreR);
+    ctx.lineTo(-coreR, 0);
+    ctx.closePath();
+    ctx.fill();
+  } else if (mine.payload === 'CRYO') {
+    drawRegularPolygon(ctx, 0, 0, coreR, 6, 0);
+    ctx.fill();
+  } else {
+    drawRegularPolygon(ctx, 0, 0, coreR * 1.05, 3, -Math.PI / 2);
+    ctx.fill();
+  }
+
+  if (armed) {
+    ctx.fillStyle = pal.towerCoreSpec;
+    ctx.globalAlpha = 0.95;
+    ctx.beginPath();
+    ctx.arc(0, 0, Math.max(1.1, ts * 0.036), 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.restore();
+}
+
 function drawSynergyConduits(
   ctx: CanvasRenderingContext2D,
   engine: VectraEngine,
@@ -776,22 +1318,72 @@ function drawSynergyConduits(
           ctx.fill();
         }
       }
-    } else if (ent.kind === 'TOWER' && ent.trigger === 'BEAM') {
-      const stats = computeTowerStats(ent, engine.entities);
+    } else if (ent.kind === 'TOWER') {
       const x1 = (ent.x + 0.5) * ts;
       const y1 = (ent.y + 0.5) * ts;
-      for (const relay of stats.prismRelays) {
-        const x2 = (relay.x + 0.5) * ts;
-        const y2 = (relay.y + 0.5) * ts;
-        ctx.strokeStyle = pal.prismRelayLine;
-        ctx.lineWidth = 1.8;
-        ctx.setLineDash([5, 5]);
-        ctx.lineDashOffset = -timeSec * 20;
+
+      // Beam -> Prism optical relay preview conduits
+      if (ent.trigger === 'BEAM') {
+        const stats = computeTowerStats(ent, engine.entities);
+        for (const relay of stats.prismRelays) {
+          const x2 = (relay.x + 0.5) * ts;
+          const y2 = (relay.y + 0.5) * ts;
+          ctx.strokeStyle = pal.prismRelayLine;
+          ctx.lineWidth = 1.8;
+          ctx.setLineDash([5, 5]);
+          ctx.lineDashOffset = -timeSec * 20;
+          ctx.beginPath();
+          ctx.moveTo(x1, y1);
+          ctx.lineTo(x2, y2);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+      }
+
+      // Tower-to-Tower orthogonal complementary-payload adjacency bridges (right & down to draw each edge once)
+      const pairDirs = [
+        [1, 0],
+        [0, 1],
+      ];
+      for (const [dx, dy] of pairDirs) {
+        const neighbor = engine.getEntityAt(ent.x + dx, ent.y + dy);
+        if (!neighbor || neighbor.kind !== 'TOWER' || neighbor.payload === ent.payload) continue;
+        const x2 = (neighbor.x + 0.5) * ts;
+        const y2 = (neighbor.y + 0.5) * ts;
+        const pulse = Math.max(ent.synergyPulse, neighbor.synergyPulse);
+        const colA = pal.payloads[ent.payload];
+        const colB = pal.payloads[neighbor.payload];
+
+        const grad = ctx.createLinearGradient(x1, y1, x2, y2);
+        grad.addColorStop(0, colA);
+        grad.addColorStop(1, colB);
+
+        ctx.save();
+        ctx.strokeStyle = grad;
+        ctx.globalAlpha = (pal.isLight ? 0.3 : 0.24) + pulse * 0.52;
+        ctx.lineWidth = 1.4 + pulse * 2.2;
+        ctx.setLineDash([3, 4]);
+        ctx.lineDashOffset = -timeSec * (14 + pulse * 24);
         ctx.beginPath();
         ctx.moveTo(x1, y1);
         ctx.lineTo(x2, y2);
         ctx.stroke();
         ctx.setLineDash([]);
+
+        // Midpoint resonance diamond tick on shared border
+        const mx = (x1 + x2) * 0.5;
+        const my = (y1 + y2) * 0.5;
+        const dr = Math.max(2, ts * (0.065 + pulse * 0.055));
+        ctx.fillStyle = pulse > 0.35 ? (pal.isLight ? colA : pal.beamCore) : colA;
+        ctx.globalAlpha = (pal.isLight ? 0.55 : 0.45) + pulse * 0.5;
+        ctx.beginPath();
+        ctx.moveTo(mx, my - dr);
+        ctx.lineTo(mx + dr, my);
+        ctx.lineTo(mx, my + dr);
+        ctx.lineTo(mx - dr, my);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
       }
     }
   }
@@ -801,7 +1393,7 @@ function drawSynergyConduits(
 function drawSelectedRange(
   ctx: CanvasRenderingContext2D,
   engine: VectraEngine,
-  sel: TowerEntity | UtilityNodeEntity,
+  sel: GridEntity,
   ts: number,
   timeSec: number,
   pal: ThemePalette
@@ -867,7 +1459,82 @@ function drawSelectedRange(
       ctx.fillRect(nx * ts + 2, ny * ts + 2, ts - 4, ts - 4);
       ctx.strokeRect(nx * ts + 2.5, ny * ts + 2.5, ts - 5, ts - 5);
     }
+  } else if (sel.kind === 'STASIS') {
+    const radiusPx = Math.max(2, FLOOR_STATS.STASIS_RADIUS * ts);
+    const color = pal.payloads.CRYO;
+    ctx.fillStyle = color;
+    ctx.globalAlpha = pal.isLight ? 0.09 : 0.08;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radiusPx, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = 0.8;
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([5, 5]);
+    ctx.lineDashOffset = timeSec * 16;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radiusPx, 0, Math.PI * 2);
+    ctx.stroke();
+  } else if (sel.kind === 'MINE') {
+    const blastPx = Math.max(2, FLOOR_STATS.MINE_BLAST_RADIUS * ts);
+    const color = pal.payloads[sel.payload];
+    ctx.fillStyle = color;
+    ctx.globalAlpha = pal.isLight ? 0.09 : 0.08;
+    ctx.beginPath();
+    ctx.arc(cx, cy, blastPx, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = 0.8;
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([6, 4]);
+    ctx.lineDashOffset = -timeSec * 14;
+    ctx.beginPath();
+    ctx.arc(cx, cy, blastPx, 0, Math.PI * 2);
+    ctx.stroke();
+  } else if (sel.kind === 'CONVEYOR') {
+    drawConveyorPushArrow(ctx, cx, cy, ts, sel.direction, pal.validColor, timeSec);
   }
+  ctx.restore();
+}
+
+function drawConveyorPushArrow(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  ts: number,
+  direction: CardinalDir,
+  color: string,
+  timeSec: number
+): void {
+  const { angle } = dirToVector(direction);
+  const pulse = 0.5 + 0.5 * Math.sin(timeSec * 5.2);
+  const len = ts * (1.28 + pulse * 0.14);
+
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(angle);
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.globalAlpha = 0.85;
+  ctx.lineWidth = 2;
+  ctx.setLineDash([4, 3]);
+  ctx.lineDashOffset = -timeSec * 18;
+  ctx.beginPath();
+  ctx.moveTo(ts * 0.28, 0);
+  ctx.lineTo(len, 0);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Arrowhead at tip
+  const head = Math.max(5, ts * 0.18);
+  ctx.beginPath();
+  ctx.moveTo(len + head * 0.5, 0);
+  ctx.lineTo(len - head * 0.65, -head * 0.6);
+  ctx.lineTo(len - head * 0.65, head * 0.6);
+  ctx.closePath();
+  ctx.fill();
   ctx.restore();
 }
 
@@ -930,6 +1597,25 @@ function drawTower(
     ctx.fillRect(pip - sz, -pip, sz, sz);
     ctx.fillRect(-pip, pip - sz, sz, sz);
     ctx.fillRect(pip - sz, pip - sz, sz, sz);
+  }
+
+  // Brief luminous chassis rim glint when receiving an Overclock surge or adjacent elemental resonance
+  if (tower.synergyPulse > 0.04) {
+    ctx.save();
+    ctx.globalCompositeOperation = pal.isLight ? 'source-over' : 'lighter';
+    ctx.strokeStyle = stats.overclocked ? pal.overclockLight : payColor;
+    ctx.globalAlpha = tower.synergyPulse * (pal.isLight ? 0.72 : 0.65);
+    ctx.lineWidth = 1.6 + tower.synergyPulse * 1.6;
+    drawChamferRect(
+      ctx,
+      -half - 1.5,
+      -half - 1.5,
+      (half + 1.5) * 2,
+      (half + 1.5) * 2,
+      ts * 0.15
+    );
+    ctx.stroke();
+    ctx.restore();
   }
 
   // Modifier silhouette attachments
@@ -1758,6 +2444,39 @@ function drawAdditiveCombatFx(
       drawRegularPolygon(ctx, cx, cy, rad, 6, p * 0.9);
       ctx.stroke();
       drawRadialGlow(ctx, cx, cy, rad * 0.8, pal.shieldGlow);
+    } else if (fx.kind === 'SYNERGY_LINK') {
+      ctx.strokeStyle = fx.color;
+      ctx.globalAlpha = inv * 0.9;
+      ctx.lineWidth = Math.max(1.2, 2.4 * inv);
+      drawRegularPolygon(ctx, cx, cy, rad, 4, p * 0.8);
+      ctx.stroke();
+
+      if (fx.secondaryColor) {
+        ctx.strokeStyle = fx.secondaryColor;
+        ctx.globalAlpha = inv * 0.72;
+        ctx.lineWidth = Math.max(1.0, 1.5 * inv);
+        ctx.beginPath();
+        ctx.arc(cx, cy, Math.max(1.5, rad * 0.68), 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    } else if (fx.kind === 'ELEMENTAL_REACTION') {
+      // Crisp expanding vector reaction fracture ring + inner secondary resonance polygon
+      ctx.strokeStyle = fx.color;
+      ctx.globalAlpha = inv * 0.94;
+      ctx.lineWidth = Math.max(1.3, 2.8 * inv);
+      drawRegularPolygon(ctx, cx, cy, rad, 6, -p * 1.1);
+      ctx.stroke();
+
+      if (fx.secondaryColor) {
+        ctx.strokeStyle = fx.secondaryColor;
+        ctx.globalAlpha = inv * 0.82;
+        ctx.lineWidth = Math.max(1.0, 1.8 * inv);
+        drawRegularPolygon(ctx, cx, cy, Math.max(1.5, rad * 0.65), 4, p * 1.4);
+        ctx.stroke();
+      }
+
+      ctx.globalAlpha = inv * (pal.isLight ? 0.2 : 0.38);
+      drawRadialGlow(ctx, cx, cy, rad * 0.78, fx.color);
     } else {
       ctx.strokeStyle = fx.color;
       ctx.globalAlpha = inv * 0.85;
@@ -1821,10 +2540,11 @@ function drawHoverOverlay(
     if (opts.activeTool === 'TOWER') {
       const pr = opts.activePreset ?? null;
       const trig = pr ? pr.trigger : 'PULSE';
+      const pay = pr ? pr.payload : 'KINETIC';
       const mod = pr ? pr.modifier : 'NONE';
       const baseRange = TRIGGERS[trig].range;
       const effRange = trig === 'NOVA' && mod === 'PIERCE' ? baseRange + 0.55 : baseRange;
-      ctx.strokeStyle = pr ? pal.payloads[pr.payload] : pal.triggers.PULSE;
+      ctx.strokeStyle = pr ? pal.payloads[pay] : pal.triggers.PULSE;
       ctx.globalAlpha = 0.68;
       ctx.lineWidth = 1.5;
       ctx.setLineDash([5, 4]);
@@ -1833,6 +2553,50 @@ function drawHoverOverlay(
       ctx.stroke();
       ctx.setLineDash([]);
       ctx.globalAlpha = 1;
+
+      // Preview orthogonal Overclock & complementary-payload tower adjacency links before placing
+      const ortho = [
+        [1, 0],
+        [-1, 0],
+        [0, 1],
+        [0, -1],
+      ];
+      for (const [dx, dy] of ortho) {
+        const neighbor = engine.getEntityAt(ht.x + dx, ht.y + dy);
+        if (!neighbor) continue;
+        if (neighbor.kind === 'OVERCLOCK') {
+          ctx.strokeStyle = pal.overclock;
+          ctx.lineWidth = 2.2;
+          ctx.beginPath();
+          ctx.moveTo(cx, cy);
+          ctx.lineTo((neighbor.x + 0.5) * ts, (neighbor.y + 0.5) * ts);
+          ctx.stroke();
+        } else if (neighbor.kind === 'TOWER' && neighbor.payload !== pay) {
+          ctx.strokeStyle = pal.payloads[neighbor.payload];
+          ctx.globalAlpha = 0.8;
+          ctx.lineWidth = 1.8;
+          ctx.setLineDash([3, 3]);
+          ctx.beginPath();
+          ctx.moveTo(cx, cy);
+          ctx.lineTo((neighbor.x + 0.5) * ts, (neighbor.y + 0.5) * ts);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.globalAlpha = 1;
+        }
+      }
+
+      if (trig === 'BEAM') {
+        for (const e of engine.entities.values()) {
+          if (e.kind === 'PRISM' && Math.hypot(e.x - ht.x, e.y - ht.y) <= TRIGGERS.BEAM.range + 0.05) {
+            ctx.strokeStyle = pal.prism;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(cx, cy);
+            ctx.lineTo((e.x + 0.5) * ts, (e.y + 0.5) * ts);
+            ctx.stroke();
+          }
+        }
+      }
     } else if (opts.activeTool === 'PRISM') {
       ctx.strokeStyle = pal.prism;
       ctx.fillStyle = `rgba(${pal.prismFloorRgb}, 0.08)`;
@@ -1873,6 +2637,36 @@ function drawHoverOverlay(
         ctx.fillRect(nx * ts + 2, ny * ts + 2, ts - 4, ts - 4);
         ctx.strokeRect(nx * ts + 2, ny * ts + 2, ts - 4, ts - 4);
       }
+    } else if (opts.activeTool === 'STASIS') {
+      ctx.strokeStyle = pal.payloads.CRYO;
+      ctx.globalAlpha = 0.72;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([5, 4]);
+      ctx.beginPath();
+      ctx.arc(cx, cy, FLOOR_STATS.STASIS_RADIUS * ts, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 1;
+    } else if (opts.activeTool === 'MINE') {
+      ctx.strokeStyle = pal.payloads.KINETIC;
+      ctx.globalAlpha = 0.72;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([5, 4]);
+      ctx.beginPath();
+      ctx.arc(cx, cy, FLOOR_STATS.MINE_BLAST_RADIUS * ts, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 1;
+    } else if (opts.activeTool === 'CONVEYOR') {
+      drawConveyorPushArrow(
+        ctx,
+        cx,
+        cy,
+        ts,
+        opts.conveyorDir ?? 'N',
+        pal.validColor,
+        opts.timeSec
+      );
     }
   }
 
@@ -1891,6 +2685,7 @@ function drawHoverOverlay(
     ts,
     opts.activeTool,
     opts.activePreset ?? null,
+    opts.conveyorDir ?? 'N',
     opts.timeSec,
     valid,
     isLockedTouch,
@@ -1997,6 +2792,7 @@ function drawGhostStructure(
   ts: number,
   tool: BuildTool,
   activePreset: TowerPreset | null,
+  conveyorDir: CardinalDir,
   timeSec: number,
   valid: boolean,
   isLockedTouch: boolean,
@@ -2107,6 +2903,66 @@ function drawGhostStructure(
     ctx.fillStyle = pal.prismCore;
     ctx.beginPath();
     ctx.arc(0, 0, ts * 0.06, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (tool === 'STASIS') {
+    const col = valid ? pal.payloads.CRYO : pal.invalidColor;
+    ctx.fillStyle = pal.towerSocketFill;
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 1.4;
+    drawChamferRect(ctx, -half, -half, half * 2, half * 2, ts * 0.14);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 1.4;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    ctx.arc(0, 0, half * 0.72, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.arc(0, 0, ts * 0.09, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (tool === 'CONVEYOR') {
+    const col = valid ? pal.validColor : pal.invalidColor;
+    const { angle } = dirToVector(conveyorDir);
+    ctx.fillStyle = pal.towerSocketFill;
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 1.4;
+    ctx.fillRect(-half, -half, half * 2, half * 2);
+    ctx.strokeRect(-half, -half, half * 2, half * 2);
+
+    ctx.rotate(angle);
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 1.8;
+    const ch = half * 0.42;
+    const cw = half * 0.26;
+    for (const offset of [-half * 0.32, half * 0.22]) {
+      ctx.beginPath();
+      ctx.moveTo(offset - cw, -ch);
+      ctx.lineTo(offset + cw * 0.45, 0);
+      ctx.lineTo(offset - cw, ch);
+      ctx.stroke();
+    }
+  } else if (tool === 'MINE') {
+    const col = valid ? pal.payloads.KINETIC : pal.invalidColor;
+    ctx.fillStyle = pal.towerSocketFill;
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 1.5;
+    drawRegularPolygon(ctx, 0, 0, r, 8, Math.PI / 8);
+    ctx.fill();
+    ctx.stroke();
+
+    const coreR = ts * 0.14;
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.moveTo(0, -coreR);
+    ctx.lineTo(coreR, 0);
+    ctx.lineTo(0, coreR);
+    ctx.lineTo(-coreR, 0);
+    ctx.closePath();
     ctx.fill();
   }
 

@@ -1,6 +1,13 @@
 import { soundEngine, SoundEvent } from '../audio/synth';
 import { getActivePalette } from '../theme/palettes';
-import { computeFlowField, inBounds, tileIndex, validatePlacement } from './flowField';
+import {
+  computeFlowField,
+  inBounds,
+  isPassable,
+  tileIndex,
+  validateFloorPlacement,
+  validatePlacement,
+} from './flowField';
 import {
   BASE_TOWER,
   BEAM_RAMP_CAP,
@@ -8,20 +15,28 @@ import {
   BEAM_TICK_HZ,
   COSTS,
   ENEMY_ARCHETYPES,
+  FLOOR_STATS,
+  PAYLOADS,
   PRISM_RADIUS,
   PRISM_SPLIT_DMG_MULT,
   TRIGGERS,
   computeTowerStats,
+  dirToVector,
+  isFloorKind,
+  rotateDirCW,
 } from './stats';
 import { createRule, evaluateTargeting, getEnemyCurrentSpeed } from './targeting';
-import { VectorParticleSystem } from './particles';
+import { ElementalReactionKind, VectorParticleSystem } from './particles';
 import {
   ActiveBeam,
+  CardinalDir,
   ChainArcFx,
   EnemyEntity,
   EnemyType,
   FIXED_DT,
   FloatingTextFx,
+  FloorEntity,
+  FloorKind,
   FlowFieldData,
   GRID_COLS,
   GRID_ROWS,
@@ -45,7 +60,14 @@ import {
   UtilityNodeEntity,
   WaveDefinition,
 } from './types';
-import { DEFAULT_WAVES, MAP_PRESETS, summarizeWave, waveHpMultiplier } from './waves';
+import {
+  DEFAULT_WAVES,
+  MAP_PRESETS,
+  ShuffleDensity,
+  generateShuffledLayout,
+  summarizeWave,
+  waveHpMultiplier,
+} from './waves';
 
 interface PendingSpawn {
   tickOffset: number;
@@ -96,6 +118,9 @@ export class VectraEngine {
   public gameOutcome: 'RUNNING' | 'VICTORY' | 'GAME_OVER' = 'RUNNING';
   public totalKills = 0;
   public totalDamage = 0;
+  public tileDamage = new Float32Array(GRID_COLS * GRID_ROWS);
+  public maxTileDamage = 0;
+  public hotTileCount = 0;
 
   public selectedEntityId: string | null = null;
   public demoMode = false;
@@ -128,6 +153,31 @@ export class VectraEngine {
     this.obstacles = preset.obstacles.map((o) => ({ ...o }));
     this.waves = waves;
     this.resetSimulationState();
+  }
+
+  public shuffleLayout(customPreset?: MapPreset, densityPref: ShuffleDensity = 'ANY'): MapPreset {
+    const preset = customPreset ?? generateShuffledLayout(densityPref);
+    this.loadPreset(preset);
+    const pal = getActivePalette();
+    for (const obs of this.obstacles) {
+      this.particleSystem.emitConstructBurst(obs.x + 0.5, obs.y + 0.5, pal.boardCorner, 4, pal);
+    }
+    this.particleSystem.emitConstructBurst(
+      this.spawn.x + 0.5,
+      this.spawn.y + 0.5,
+      pal.spawnRing,
+      7,
+      pal
+    );
+    this.particleSystem.emitConstructBurst(
+      this.goal.x + 0.5,
+      this.goal.y + 0.5,
+      pal.goalArcLit,
+      7,
+      pal
+    );
+    this.emitSound('SWAP');
+    return preset;
   }
 
   public loadSeed(seed: SeedPayload): void {
@@ -187,6 +237,9 @@ export class VectraEngine {
     this.gameOutcome = 'RUNNING';
     this.totalKills = 0;
     this.totalDamage = 0;
+    this.tileDamage.fill(0);
+    this.maxTileDamage = 0;
+    this.hotTileCount = 0;
     this.selectedEntityId = null;
     this.shakeTime = 0;
     this.shakeIntensity = 0;
@@ -196,45 +249,132 @@ export class VectraEngine {
     this.notify();
   }
 
+  public clearHeatmap(): void {
+    this.tileDamage.fill(0);
+    this.maxTileDamage = 0;
+    this.hotTileCount = 0;
+    this.notify();
+  }
+
   /** Sets up a live autonomous vector battle for the atmospheric Title Screen */
   public loadDemoBattle(preset: MapPreset = MAP_PRESETS[0]): void {
     this.loadPreset(preset);
     this.demoMode = true;
     this.gold = 9999;
 
-    // Build an illustrative maze showcasing Pulse+Chain, Cryo+Nova, Beam+Prism+Corrode, and Overclock
-    const demoBuilds: Array<{
-      x: number;
-      y: number;
-      kind: 'TOWER' | 'OVERCLOCK' | 'PRISM';
-      trigger?: TriggerType;
-      payload?: PayloadType;
-      modifier?: ModifierType;
+    // Dynamically place showcase towers, Overclock & Prism nodes hugging the actual flow path
+    // so every randomized topology (inverted, diagonal, cross-flank, inset core, dense) has a lively demo!
+    const towerSpecs: Array<{
+      frac: number;
+      trigger: TriggerType;
+      payload: PayloadType;
+      modifier: ModifierType;
+      withOverclock?: boolean;
+      withPrism?: boolean;
     }> = [
-      { x: 4, y: 4, kind: 'TOWER', trigger: 'PULSE', payload: 'KINETIC', modifier: 'CHAIN' },
-      { x: 5, y: 4, kind: 'OVERCLOCK' },
-      { x: 6, y: 4, kind: 'TOWER', trigger: 'NOVA', payload: 'CRYO', modifier: 'SPLASH' },
-      { x: 6, y: 8, kind: 'TOWER', trigger: 'BEAM', payload: 'CORRODE', modifier: 'NONE' },
-      { x: 5, y: 10, kind: 'PRISM' },
-      { x: 8, y: 11, kind: 'TOWER', trigger: 'PULSE', payload: 'KINETIC', modifier: 'PIERCE' },
-      { x: 5, y: 14, kind: 'TOWER', trigger: 'BEAM', payload: 'KINETIC', modifier: 'CHAIN' },
-      { x: 4, y: 14, kind: 'OVERCLOCK' },
-      { x: 7, y: 15, kind: 'TOWER', trigger: 'NOVA', payload: 'CRYO', modifier: 'NONE' },
+      { frac: 0.22, trigger: 'PULSE', payload: 'KINETIC', modifier: 'CHAIN', withOverclock: true },
+      { frac: 0.34, trigger: 'NOVA', payload: 'CRYO', modifier: 'SPLASH' },
+      { frac: 0.5, trigger: 'BEAM', payload: 'CORRODE', modifier: 'NONE', withPrism: true },
+      { frac: 0.64, trigger: 'PULSE', payload: 'KINETIC', modifier: 'PIERCE' },
+      { frac: 0.78, trigger: 'BEAM', payload: 'KINETIC', modifier: 'CHAIN', withOverclock: true },
+      { frac: 0.86, trigger: 'NOVA', payload: 'CRYO', modifier: 'NONE' },
     ];
 
-    for (const b of demoBuilds) {
-      const check = this.checkPlacement(b.x, b.y);
-      if (!check.valid) continue;
-      if (b.kind === 'TOWER') {
-        const id = this.placeEntity(b.x, b.y, 'TOWER');
+    const orthoOffsets: readonly [number, number][] = [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+    ];
+    const nearOffsets: readonly [number, number][] = [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+      [1, 1],
+      [-1, 1],
+      [1, -1],
+      [-1, -1],
+      [2, 0],
+      [-2, 0],
+      [0, 2],
+      [0, -2],
+    ];
+
+    for (const spec of towerSpecs) {
+      const curPath = this.flowField.pathTiles;
+      if (curPath.length < 6) break;
+      const anchor =
+        curPath[Math.min(curPath.length - 3, Math.max(2, Math.floor(curPath.length * spec.frac)))];
+
+      let placedPos: GridPoint | null = null;
+      for (const [dx, dy] of nearOffsets) {
+        const tx = anchor.x + dx;
+        const ty = anchor.y + dy;
+        const check = this.checkPlacement(tx, ty, 0, false);
+        if (!check.valid) continue;
+        const id = this.placeEntity(tx, ty, 'TOWER');
         if (id) {
           const t = this.entities.get(id) as TowerEntity;
-          if (b.trigger) t.trigger = b.trigger;
-          if (b.payload) t.payload = b.payload;
-          if (b.modifier) t.modifier = b.modifier;
+          t.trigger = spec.trigger;
+          t.payload = spec.payload;
+          t.modifier = spec.modifier;
+          placedPos = { x: tx, y: ty };
+          break;
         }
-      } else {
-        this.placeEntity(b.x, b.y, b.kind);
+      }
+
+      if (placedPos && spec.withOverclock) {
+        for (const [dx, dy] of orthoOffsets) {
+          const ox = placedPos.x + dx;
+          const oy = placedPos.y + dy;
+          if (this.checkPlacement(ox, oy, 0, false).valid) {
+            this.placeEntity(ox, oy, 'OVERCLOCK');
+            break;
+          }
+        }
+      }
+
+      if (placedPos && spec.withPrism) {
+        for (const [dx, dy] of nearOffsets) {
+          const px = placedPos.x + dx;
+          const py = placedPos.y + dy;
+          if (Math.hypot(dx, dy) >= 1.4 && this.checkPlacement(px, py, 0, false).valid) {
+            this.placeEntity(px, py, 'PRISM');
+            break;
+          }
+        }
+      }
+    }
+
+    // Place walkable floor tiles directly along the active shortest path
+    const path = this.flowField.pathTiles;
+    if (path.length >= 10) {
+      const floorPlacements: Array<{
+        frac: number;
+        kind: FloorKind;
+        payload?: PayloadType;
+      }> = [
+        { frac: 0.3, kind: 'STASIS' },
+        { frac: 0.55, kind: 'CONVEYOR' },
+        { frac: 0.78, kind: 'MINE', payload: 'CORRODE' },
+      ];
+      for (const fp of floorPlacements) {
+        const idx = Math.min(path.length - 2, Math.max(2, Math.floor(path.length * fp.frac)));
+        const pt = path[idx];
+        // Orient repulsor opposite to enemy movement along the path
+        let repulsorDir: CardinalDir = 'N';
+        if (fp.kind === 'CONVEYOR' && idx > 0) {
+          const prev = path[idx - 1];
+          const bdx = prev.x - pt.x;
+          const bdy = prev.y - pt.y;
+          repulsorDir = bdx > 0 ? 'E' : bdx < 0 ? 'W' : bdy > 0 ? 'S' : 'N';
+        }
+        const id = this.placeEntity(pt.x, pt.y, fp.kind, null, repulsorDir);
+        if (id && fp.kind === 'MINE' && fp.payload) {
+          const f = this.entities.get(id) as FloorEntity;
+          f.payload = fp.payload;
+        }
       }
     }
 
@@ -268,8 +408,15 @@ export class VectraEngine {
     return false;
   }
 
-  public checkPlacement(x: number, y: number, cost = 0): PlacementCheckResult {
-    const base = validatePlacement(this.grid, this.spawn, this.goal, this.enemies, x, y);
+  public checkPlacement(
+    x: number,
+    y: number,
+    cost = 0,
+    walkable = false
+  ): PlacementCheckResult {
+    const base = walkable
+      ? validateFloorPlacement(this.grid, x, y)
+      : validatePlacement(this.grid, this.spawn, this.goal, this.enemies, x, y);
     if (!base.valid) return base;
     if (!this.demoMode && cost > this.gold) {
       return { valid: false, reason: `Need ${cost}g`, previewPath: base.previewPath };
@@ -280,13 +427,15 @@ export class VectraEngine {
   public placeEntity(
     x: number,
     y: number,
-    kind: 'TOWER' | 'OVERCLOCK' | 'PRISM',
-    preset?: TowerPreset | null
+    kind: 'TOWER' | 'OVERCLOCK' | 'PRISM' | FloorKind,
+    preset?: TowerPreset | null,
+    direction: CardinalDir = 'N'
   ): string | null {
     if (this.gameOutcome !== 'RUNNING') return null;
+    const walkable = isFloorKind(kind);
     const activePreset = kind === 'TOWER' ? preset ?? null : null;
     const cost = activePreset ? activePreset.cost : COSTS[kind];
-    const check = this.checkPlacement(x, y, cost);
+    const check = this.checkPlacement(x, y, cost, walkable);
     if (!check.valid) {
       this.emitSound('INVALID');
       return null;
@@ -320,9 +469,10 @@ export class VectraEngine {
         totalDamage: 0,
         kills: 0,
         recoil: 0,
+        synergyPulse: 0,
       };
       this.entities.set(id, tower);
-    } else {
+    } else if (kind === 'OVERCLOCK' || kind === 'PRISM') {
       const node: UtilityNodeEntity = {
         id,
         kind,
@@ -334,10 +484,30 @@ export class VectraEngine {
         prismBeamTargets: [],
       };
       this.entities.set(id, node);
+    } else {
+      const floor: FloorEntity = {
+        id,
+        kind,
+        x,
+        y,
+        investedGold: cost,
+        placedInWave: this.waveActive ? this.waveIndex : -1,
+        activePulse: 0.8,
+        direction,
+        payload: 'KINETIC',
+        cooldown: 0,
+        maxCooldown: FLOOR_STATS.MINE_RECHARGE_SEC,
+        triggers: 0,
+        totalDamage: 0,
+        kills: 0,
+      };
+      this.entities.set(id, floor);
     }
 
     const pal = getActivePalette();
-    this.flowField = computeFlowField(this.grid, this.spawn, this.goal);
+    if (!walkable) {
+      this.flowField = computeFlowField(this.grid, this.spawn, this.goal);
+    }
     this.selectedEntityId = this.demoMode ? null : id;
     const burstColor = activePreset
       ? pal.payloads[activePreset.payload]
@@ -345,8 +515,18 @@ export class VectraEngine {
       ? pal.overclock
       : kind === 'PRISM'
       ? pal.prism
+      : kind === 'STASIS'
+      ? pal.payloads.CRYO
+      : kind === 'CONVEYOR'
+      ? pal.validColor
+      : kind === 'MINE'
+      ? pal.payloads.KINETIC
       : pal.triggers.PULSE;
     this.particleSystem.emitConstructBurst(x + 0.5, y + 0.5, burstColor, activePreset ? 13 : 9, pal);
+    const createdEnt = this.entities.get(id);
+    if (createdEnt && !walkable) {
+      this.emitPlacementSynergies(createdEnt, pal);
+    }
     this.emitSound('BUILD');
     this.notify();
     return id;
@@ -449,6 +629,9 @@ export class VectraEngine {
       ent.modifier = value as ModifierType;
     }
 
+    if (slot === 'trigger' || slot === 'payload') {
+      this.emitPlacementSynergies(ent, pal);
+    }
     this.emitSound('SWAP');
     this.notify();
     return true;
@@ -459,6 +642,69 @@ export class VectraEngine {
     if (!ent || ent.kind !== 'TOWER') return;
     ent.rules = rules.slice(0, 3);
     this.notify();
+  }
+
+  public setFloorDirection(entityId: string, dir: CardinalDir): boolean {
+    const ent = this.entities.get(entityId);
+    if (!ent || ent.kind !== 'CONVEYOR') return false;
+    if (ent.direction === dir) return true;
+    ent.direction = dir;
+    ent.activePulse = 0.85;
+    this.emitSound('SWAP');
+    this.notify();
+    return true;
+  }
+
+  public rotateFloorEntity(entityId: string): boolean {
+    const ent = this.entities.get(entityId);
+    if (!ent || ent.kind !== 'CONVEYOR') return false;
+    return this.setFloorDirection(entityId, rotateDirCW(ent.direction));
+  }
+
+  public updateMinePayload(entityId: string, payload: PayloadType): boolean {
+    const ent = this.entities.get(entityId);
+    if (!ent || ent.kind !== 'MINE') return false;
+    if (ent.payload === payload) return true;
+
+    const pal = getActivePalette();
+    const fee = this.waveActive ? COSTS.MID_WAVE_SWAP : 0;
+    if (fee > 0 && this.gold < fee) {
+      this.floatingTexts.push({
+        x: ent.x + 0.5,
+        y: ent.y + 0.25,
+        text: `Need ${fee}g`,
+        color: pal.breachText,
+        age: 0,
+        duration: 0.75,
+      });
+      this.emitSound('INVALID');
+      return false;
+    }
+
+    if (fee > 0) {
+      this.gold -= fee;
+      this.floatingTexts.push({
+        x: ent.x + 0.5,
+        y: ent.y + 0.3,
+        text: `-${fee}g`,
+        color: pal.goldText,
+        age: 0,
+        duration: 0.65,
+      });
+    }
+
+    ent.payload = payload;
+    ent.activePulse = 0.9;
+    this.particleSystem.emitConstructBurst(
+      ent.x + 0.5,
+      ent.y + 0.5,
+      pal.payloads[payload],
+      7,
+      pal
+    );
+    this.emitSound('SWAP');
+    this.notify();
+    return true;
   }
 
   public startNextWave(): boolean {
@@ -478,10 +724,14 @@ export class VectraEngine {
     }
     this.spawnQueue.sort((a, b) => a.tickOffset - b.tickOffset);
 
-    // Mark existing towers as committed to a wave so selling later yields 80%
+    // Mark existing towers/nodes/floor tiles as committed to a wave & re-arm all Pulse Mines
     for (const ent of this.entities.values()) {
       if (ent.placedInWave === -1) {
         ent.placedInWave = this.waveIndex;
+      }
+      if (ent.kind === 'MINE') {
+        ent.cooldown = 0;
+        ent.activePulse = 0.8;
       }
     }
 
@@ -525,9 +775,18 @@ export class VectraEngine {
     for (const ent of this.entities.values()) {
       if (ent.kind === 'TOWER') {
         ent.recoil = Math.max(0, ent.recoil - FIXED_DT * 6.5);
-      } else {
+        ent.synergyPulse = Math.max(0, ent.synergyPulse - FIXED_DT * 2.4);
+      } else if (ent.kind === 'OVERCLOCK' || ent.kind === 'PRISM') {
         ent.activePulse = Math.max(0, ent.activePulse - FIXED_DT * 2.5);
         ent.prismBeamTargets = [];
+      } else {
+        ent.activePulse = Math.max(0, ent.activePulse - FIXED_DT * 2.5);
+        if (ent.kind === 'MINE' && ent.cooldown > 0) {
+          ent.cooldown = Math.max(0, ent.cooldown - FIXED_DT);
+          if (ent.cooldown === 0) {
+            ent.activePulse = 0.85;
+          }
+        }
       }
     }
 
@@ -543,8 +802,14 @@ export class VectraEngine {
     // 3. Update Enemies (status timers, shield regen, flow-field steering, goal check)
     this.updateEnemies();
 
+    // 3.5 Update Walkable Floor Tiles (Stasis Wells, Vector Repulsors, Pulse Mines)
+    this.updateFloorTiles();
+
     // 4. Update Towers (targeting rules, Pulse / Beam + Prism / Nova)
     this.updateTowers();
+
+    // 4.5 Ambient adjacency synergy particle conduits
+    this.updateSynergyAmbientFx();
 
     // 5. Update Projectiles
     this.updateProjectiles();
@@ -616,6 +881,13 @@ export class VectraEngine {
       radius: cfg.radius,
       slowTimer: 0,
       shredTimer: 0,
+      stasisTimer: 0,
+      repulseCooldown: 0,
+      knockVx: 0,
+      knockVy: 0,
+      knockTimer: 0,
+      reactionFxCooldown: 0,
+      statusFxTimer: 0.08 + Math.random() * 0.12,
       hitFlash: 0,
       shieldFlash: 0,
       spawnScale: 0.15,
@@ -634,6 +906,7 @@ export class VectraEngine {
   }
 
   private updateEnemies(): void {
+    const pal = getActivePalette();
     for (let i = this.enemies.length - 1; i >= 0; i--) {
       const e = this.enemies[i];
       if (e.hp <= 0) continue;
@@ -649,6 +922,29 @@ export class VectraEngine {
       }
       if (e.slowTimer > 0) e.slowTimer = Math.max(0, e.slowTimer - FIXED_DT);
       if (e.shredTimer > 0) e.shredTimer = Math.max(0, e.shredTimer - FIXED_DT);
+      if (e.stasisTimer > 0) e.stasisTimer = Math.max(0, e.stasisTimer - FIXED_DT);
+      if (e.repulseCooldown > 0) e.repulseCooldown = Math.max(0, e.repulseCooldown - FIXED_DT);
+      if (e.knockTimer > 0) e.knockTimer = Math.max(0, e.knockTimer - FIXED_DT);
+      if (e.reactionFxCooldown > 0) {
+        e.reactionFxCooldown = Math.max(0, e.reactionFxCooldown - FIXED_DT);
+      }
+
+      // Ambient elemental status shedding particles (Cryo frost crystals / Corrode vapor / dual-primed)
+      if (e.slowTimer > 0 || e.shredTimer > 0) {
+        e.statusFxTimer -= FIXED_DT;
+        if (e.statusFxTimer <= 0) {
+          if (e.slowTimer > 0 && e.shredTimer > 0) {
+            this.particleSystem.emitDualDebuffAmbient(e.x, e.y, pal);
+            e.statusFxTimer = 0.14 + Math.random() * 0.1;
+          } else if (e.slowTimer > 0) {
+            this.particleSystem.emitCryoAmbient(e.x, e.y, pal);
+            e.statusFxTimer = 0.2 + Math.random() * 0.14;
+          } else {
+            this.particleSystem.emitCorrodeAmbient(e.x, e.y, pal);
+            e.statusFxTimer = 0.2 + Math.random() * 0.14;
+          }
+        }
+      }
 
       // Shielded enemy: regenerates after 3.0s out of combat
       if (e.maxShield > 0) {
@@ -717,10 +1013,16 @@ export class VectraEngine {
       }
 
       const speed = getEnemyCurrentSpeed(e);
-      e.vx = dx * speed;
-      e.vy = dy * speed;
-      e.x += e.vx * FIXED_DT;
-      e.y += e.vy * FIXED_DT;
+      let vx = dx * speed;
+      let vy = dy * speed;
+      if (e.knockTimer > 0) {
+        const ratio = Math.min(1, e.knockTimer / FLOOR_STATS.CONVEYOR_PUSH_DURATION);
+        vx = vx * 0.25 + e.knockVx * ratio;
+        vy = vy * 0.25 + e.knockVy * ratio;
+      }
+      e.vx = vx;
+      e.vy = vy;
+      this.tryMoveEnemy(e, e.vx * FIXED_DT, e.vy * FIXED_DT);
       e.angle = Math.atan2(dy, dx);
 
       // Record smooth motion trail every 2 ticks
@@ -728,6 +1030,140 @@ export class VectraEngine {
         e.trail.push({ x: e.x, y: e.y });
         if (e.trail.length > 7) {
           e.trail.shift();
+        }
+      }
+    }
+  }
+
+  /** Safely moves an enemy along (stepX, stepY), preventing floor knockback or pull from pushing into solid walls */
+  private tryMoveEnemy(e: EnemyEntity, stepX: number, stepY: number): void {
+    const pad = 0.14;
+    const candX = Math.max(pad, Math.min(GRID_COLS - pad, e.x + stepX));
+    const tx = Math.max(0, Math.min(GRID_COLS - 1, Math.floor(candX)));
+    const cy = Math.max(0, Math.min(GRID_ROWS - 1, Math.floor(e.y)));
+    if (isPassable(this.grid[tileIndex(tx, cy)])) {
+      e.x = candX;
+    }
+
+    const candY = Math.max(pad, Math.min(GRID_ROWS - pad, e.y + stepY));
+    const cx = Math.max(0, Math.min(GRID_COLS - 1, Math.floor(e.x)));
+    const ty = Math.max(0, Math.min(GRID_ROWS - 1, Math.floor(candY)));
+    if (isPassable(this.grid[tileIndex(cx, ty)])) {
+      e.y = candY;
+    }
+  }
+
+  /** Applies Stasis gravity wells, Vector Repulsor directional shoves, and rechargeable Pulse Mine detonations */
+  private updateFloorTiles(): void {
+    if (this.enemies.length === 0) return;
+    const pal = getActivePalette();
+
+    for (const ent of this.entities.values()) {
+      if (ent.kind !== 'STASIS' && ent.kind !== 'CONVEYOR' && ent.kind !== 'MINE') continue;
+      const cx = ent.x + 0.5;
+      const cy = ent.y + 0.5;
+
+      if (ent.kind === 'STASIS') {
+        let pulledAny = false;
+        for (let i = 0; i < this.enemies.length; i++) {
+          const e = this.enemies[i];
+          if (e.hp <= 0) continue;
+          const dx = cx - e.x;
+          const dy = cy - e.y;
+          const dist = Math.hypot(dx, dy);
+          if (dist <= FLOOR_STATS.STASIS_RADIUS + e.radius * 0.5) {
+            e.stasisTimer = Math.max(e.stasisTimer, 0.22);
+            pulledAny = true;
+            if (dist > 0.22) {
+              const pull = FLOOR_STATS.STASIS_PULL_SPEED * FIXED_DT;
+              this.tryMoveEnemy(e, (dx / dist) * pull, (dy / dist) * pull);
+            }
+            if ((this.tick + i * 7) % 14 === 0) {
+              this.particleSystem.emitStasisPull(e.x, e.y, cx, cy, pal);
+            }
+          }
+        }
+        if (pulledAny) {
+          ent.activePulse = Math.max(ent.activePulse, 0.72);
+        }
+      } else if (ent.kind === 'CONVEYOR') {
+        const { dx, dy, angle } = dirToVector(ent.direction);
+        for (let i = 0; i < this.enemies.length; i++) {
+          const e = this.enemies[i];
+          if (e.hp <= 0) continue;
+          if (Math.abs(e.x - cx) <= 0.52 && Math.abs(e.y - cy) <= 0.52) {
+            // Subtle belt drift while crossing the strip
+            this.tryMoveEnemy(
+              e,
+              dx * FLOOR_STATS.CONVEYOR_DRIFT_SPEED * FIXED_DT,
+              dy * FLOOR_STATS.CONVEYOR_DRIFT_SPEED * FIXED_DT
+            );
+            ent.activePulse = Math.max(ent.activePulse, 0.55);
+
+            // Crisp impulse shove on entry (cooldown-gated per enemy to prevent infinite loops)
+            if (e.repulseCooldown <= 0) {
+              e.knockVx = dx * FLOOR_STATS.CONVEYOR_PUSH_SPEED;
+              e.knockVy = dy * FLOOR_STATS.CONVEYOR_PUSH_SPEED;
+              e.knockTimer = FLOOR_STATS.CONVEYOR_PUSH_DURATION;
+              e.repulseCooldown = FLOOR_STATS.CONVEYOR_ENEMY_COOLDOWN;
+              ent.triggers++;
+              ent.activePulse = 1.0;
+              this.particleSystem.emitConveyorRepulse(e.x, e.y, angle, pal);
+              this.emitSound('SWAP', 0.55);
+            }
+          }
+        }
+      } else if (ent.kind === 'MINE' && ent.cooldown <= 0) {
+        let triggered = false;
+        for (let i = 0; i < this.enemies.length; i++) {
+          const e = this.enemies[i];
+          if (e.hp <= 0) continue;
+          if (Math.hypot(e.x - cx, e.y - cy) <= FLOOR_STATS.MINE_TRIGGER_RADIUS + e.radius * 0.4) {
+            triggered = true;
+            break;
+          }
+        }
+        if (triggered) {
+          ent.cooldown = ent.maxCooldown;
+          ent.activePulse = 1.0;
+          ent.triggers++;
+          const blastDmg = FLOOR_STATS.MINE_BASE_DAMAGE * PAYLOADS[ent.payload].dmgMult;
+          const payColor = pal.payloads[ent.payload];
+
+          for (let i = 0; i < this.enemies.length; i++) {
+            const e = this.enemies[i];
+            if (e.hp <= 0) continue;
+            if (Math.hypot(e.x - cx, e.y - cy) <= FLOOR_STATS.MINE_BLAST_RADIUS + e.radius) {
+              const preTotal = e.hp + e.shield;
+              this.applyDamage(e, blastDmg, ent.payload, undefined, 1.0);
+              const postTotal = Math.max(0, e.hp) + Math.max(0, e.shield);
+              ent.totalDamage += Math.max(0, preTotal - postTotal);
+              if (e.hp <= 0) ent.kills++;
+            }
+          }
+
+          this.novaRings.push({
+            x: cx,
+            y: cy,
+            maxRadius: FLOOR_STATS.MINE_BLAST_RADIUS,
+            age: 0,
+            duration: 0.34,
+            color: payColor,
+          });
+          this.impactFlashes.push({
+            x: cx,
+            y: cy,
+            maxRadius: FLOOR_STATS.MINE_BLAST_RADIUS * 0.85,
+            color: payColor,
+            age: 0,
+            duration: 0.28,
+            kind: 'SHOCKWAVE',
+          });
+          this.particleSystem.emitMineDetonate(cx, cy, ent.payload, pal);
+          if (!this.demoMode) {
+            this.triggerShake(0.09, 2.2);
+          }
+          this.emitSound('NOVA', 0.95);
         }
       }
     }
@@ -784,13 +1220,13 @@ export class VectraEngine {
       if (ent.trigger === 'PULSE') {
         ent.angle = Math.atan2(target.y - ty, target.x - tx);
         if (ent.cooldown <= 0) {
-          this.firePulse(ent, target, stats.damage);
+          this.firePulse(ent, target, stats.damage, stats.overclockSources);
           ent.cooldown = 1 / stats.fireRate;
           ent.recoil = 1;
         }
       } else if (ent.trigger === 'NOVA') {
         if (ent.cooldown <= 0) {
-          this.fireNova(ent, inRange, stats.damage, stats.range);
+          this.fireNova(ent, inRange, stats.damage, stats.range, stats.overclockSources);
           ent.cooldown = 1 / stats.fireRate;
           ent.recoil = 1;
         }
@@ -798,7 +1234,12 @@ export class VectraEngine {
     }
   }
 
-  private firePulse(tower: TowerEntity, target: EnemyEntity, damage: number): void {
+  private firePulse(
+    tower: TowerEntity,
+    target: EnemyEntity,
+    damage: number,
+    overclockSources: GridPoint[]
+  ): void {
     const tx = tower.x + 0.5;
     const ty = tower.y + 0.5;
     const dx = target.x - tx;
@@ -839,6 +1280,9 @@ export class VectraEngine {
       kind: 'MUZZLE',
     });
     this.particleSystem.emitTowerFire(muzzleX, muzzleY, fireAngle, 'PULSE', tower.payload, pal);
+    if (overclockSources.length > 0) {
+      this.emitOverclockFireSurge(tower, overclockSources, pal);
+    }
     this.emitSound('PULSE', 0.85);
   }
 
@@ -846,7 +1290,8 @@ export class VectraEngine {
     tower: TowerEntity,
     inRange: EnemyEntity[],
     damage: number,
-    range: number
+    range: number,
+    overclockSources: GridPoint[]
   ): void {
     const tx = tower.x + 0.5;
     const ty = tower.y + 0.5;
@@ -869,6 +1314,9 @@ export class VectraEngine {
       color,
     });
     this.particleSystem.emitTowerFire(tx, ty, 0, 'NOVA', tower.payload, pal);
+    if (overclockSources.length > 0) {
+      this.emitOverclockFireSurge(tower, overclockSources, pal);
+    }
 
     for (const e of targets) {
       const hitShield = e.shield > 0.01;
@@ -1037,9 +1485,20 @@ export class VectraEngine {
         for (const c of chosen) {
           this.applyBeamHit(tower, c, perTargetDmg, armorScale, px, py, rampRatio);
         }
-        if (this.tick % 6 === 0) {
-          const pal = getActivePalette();
-          this.particleSystem.emitTowerFire(px, py, tower.angle, 'BEAM', tower.payload, pal);
+        const pal = getActivePalette();
+        if (this.tick % 4 === 0 && chosen.length > 0) {
+          const splitAngles = chosen.map((c) => Math.atan2(c.y - py, c.x - px));
+          this.particleSystem.emitPrismRefraction(
+            px,
+            py,
+            tower.payload,
+            splitAngles,
+            rampRatio,
+            pal
+          );
+        }
+        if (stats.overclockSources.length > 0 && this.tick % 18 === 0) {
+          this.emitOverclockFireSurge(tower, stats.overclockSources, pal);
         }
       }
       return;
@@ -1089,8 +1548,8 @@ export class VectraEngine {
       const tickDmg = (stats.dps * rampMult) / BEAM_TICK_HZ;
       const armorScale = BASE_TOWER.fireRate / BEAM_TICK_HZ;
       this.applyBeamHit(tower, target, tickDmg, armorScale, tx, ty, rampRatio);
+      const pal = getActivePalette();
       if (this.tick % 8 === 0) {
-        const pal = getActivePalette();
         this.particleSystem.emitTowerFire(
           tx + Math.cos(tower.angle) * 0.34,
           ty + Math.sin(tower.angle) * 0.34,
@@ -1099,6 +1558,9 @@ export class VectraEngine {
           tower.payload,
           pal
         );
+      }
+      if (stats.overclockSources.length > 0 && this.tick % 18 === 0) {
+        this.emitOverclockFireSurge(tower, stats.overclockSources, pal);
       }
     }
   }
@@ -1330,6 +1792,10 @@ export class VectraEngine {
   ): void {
     if (enemy.hp <= 0) return;
 
+    // Capture pre-existing elemental debuffs to detect cross-payload reactions
+    const hadSlow = enemy.slowTimer > 0;
+    const hadShred = enemy.shredTimer > 0;
+
     // Reset out-of-combat timer for shield regen
     enemy.timeSinceDamage = 0;
 
@@ -1338,6 +1804,62 @@ export class VectraEngine {
       enemy.slowTimer = Math.max(enemy.slowTimer, 2.5);
     } else if (payload === 'CORRODE') {
       enemy.shredTimer = Math.max(enemy.shredTimer, 4.0);
+    }
+
+    // Trigger elemental payload interaction particle bursts when complementary payloads combine on a target
+    let reaction: ElementalReactionKind | null = null;
+    if (payload === 'KINETIC') {
+      if (hadSlow && hadShred) reaction = 'TRI_BREACH';
+      else if (hadSlow) reaction = 'FROST_SHATTER';
+      else if (hadShred) reaction = 'ARMOR_MELT';
+    } else if (
+      (payload === 'CRYO' && hadShred) ||
+      (payload === 'CORRODE' && hadSlow)
+    ) {
+      reaction = 'BRITTLE_FLUX';
+    }
+
+    if (reaction && enemy.reactionFxCooldown <= 0) {
+      const pal = getActivePalette();
+      const impactAngle = tower
+        ? Math.atan2(enemy.y - (tower.y + 0.5), enemy.x - (tower.x + 0.5))
+        : 0;
+      this.particleSystem.emitElementalReaction(enemy.x, enemy.y, reaction, impactAngle, pal);
+
+      const primaryColor =
+        reaction === 'FROST_SHATTER'
+          ? pal.payloads.CRYO
+          : reaction === 'ARMOR_MELT'
+          ? pal.payloads.CORRODE
+          : reaction === 'BRITTLE_FLUX'
+          ? pal.payloads.CRYO
+          : pal.payloads.KINETIC;
+      const secondaryColor =
+        reaction === 'FROST_SHATTER'
+          ? pal.payloads.KINETIC
+          : reaction === 'ARMOR_MELT'
+          ? pal.payloads.KINETIC
+          : reaction === 'BRITTLE_FLUX'
+          ? pal.payloads.CORRODE
+          : pal.payloads.CRYO;
+
+      this.impactFlashes.push({
+        x: enemy.x,
+        y: enemy.y,
+        maxRadius: reaction === 'TRI_BREACH' ? 0.92 : 0.66,
+        color: primaryColor,
+        secondaryColor,
+        age: 0,
+        duration: reaction === 'TRI_BREACH' ? 0.3 : 0.24,
+        kind: 'ELEMENTAL_REACTION',
+      });
+
+      enemy.reactionFxCooldown = reaction === 'TRI_BREACH' ? 0.34 : 0.42;
+
+      // Also pulse orthogonally adjacent complementary-payload towers to visually link the combo
+      if (tower) {
+        this.pulseAdjacentElementalPartners(tower, hadSlow, hadShred, pal);
+      }
     }
 
     // Shred adds +25% damage taken
@@ -1380,10 +1902,267 @@ export class VectraEngine {
     }
 
     this.totalDamage += dealt;
+    if (dealt > 0) {
+      const gx = Math.max(0, Math.min(GRID_COLS - 1, Math.floor(enemy.x)));
+      const gy = Math.max(0, Math.min(GRID_ROWS - 1, Math.floor(enemy.y)));
+      const tIdx = tileIndex(gx, gy);
+      if (this.tileDamage[tIdx] === 0) {
+        this.hotTileCount++;
+      }
+      const nextTileDmg = this.tileDamage[tIdx] + dealt;
+      this.tileDamage[tIdx] = nextTileDmg;
+      if (nextTileDmg > this.maxTileDamage) {
+        this.maxTileDamage = nextTileDmg;
+      }
+    }
     if (tower) {
       tower.totalDamage += dealt;
       if (enemy.hp <= 0) {
         tower.kills++;
+      }
+    }
+  }
+
+  /** Emits lock-in synergy streams when a tower or utility node is placed or hot-swapped into a synergy link */
+  private emitPlacementSynergies(ent: GridEntity, pal: ReturnType<typeof getActivePalette>): void {
+    const dirs = [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+    ];
+    const cx = ent.x + 0.5;
+    const cy = ent.y + 0.5;
+
+    if (ent.kind === 'OVERCLOCK') {
+      for (const [dx, dy] of dirs) {
+        const neighbor = this.getEntityAt(ent.x + dx, ent.y + dy);
+        if (neighbor && neighbor.kind === 'TOWER') {
+          neighbor.synergyPulse = 1.0;
+          ent.activePulse = 1.0;
+          this.particleSystem.emitSynergyLinkLock(
+            cx,
+            cy,
+            neighbor.x + 0.5,
+            neighbor.y + 0.5,
+            pal.overclock,
+            pal.payloads[neighbor.payload],
+            pal
+          );
+          this.impactFlashes.push({
+            x: (cx + neighbor.x + 0.5) * 0.5,
+            y: (cy + neighbor.y + 0.5) * 0.5,
+            maxRadius: 0.56,
+            color: pal.overclock,
+            secondaryColor: pal.overclockLight,
+            age: 0,
+            duration: 0.3,
+            kind: 'SYNERGY_LINK',
+          });
+        }
+      }
+      return;
+    }
+
+    if (ent.kind === 'PRISM') {
+      for (const other of this.entities.values()) {
+        if (other.kind !== 'TOWER' || other.trigger !== 'BEAM') continue;
+        if (Math.hypot(other.x - ent.x, other.y - ent.y) <= TRIGGERS.BEAM.range + 0.05) {
+          other.synergyPulse = 1.0;
+          ent.activePulse = 1.0;
+          this.particleSystem.emitSynergyLinkLock(
+            other.x + 0.5,
+            other.y + 0.5,
+            cx,
+            cy,
+            pal.payloads[other.payload],
+            pal.prism,
+            pal
+          );
+          this.impactFlashes.push({
+            x: cx,
+            y: cy,
+            maxRadius: 0.7,
+            color: pal.prism,
+            secondaryColor: pal.payloads[other.payload],
+            age: 0,
+            duration: 0.32,
+            kind: 'SYNERGY_LINK',
+          });
+        }
+      }
+      return;
+    }
+
+    if (ent.kind !== 'TOWER') return;
+
+    // TOWER placed or swapped: check Overclocks, Prisms (if Beam), and orthogonal complementary towers
+    for (const [dx, dy] of dirs) {
+      const neighbor = this.getEntityAt(ent.x + dx, ent.y + dy);
+      if (!neighbor) continue;
+      if (neighbor.kind === 'OVERCLOCK') {
+        ent.synergyPulse = 1.0;
+        neighbor.activePulse = 1.0;
+        this.particleSystem.emitSynergyLinkLock(
+          neighbor.x + 0.5,
+          neighbor.y + 0.5,
+          cx,
+          cy,
+          pal.overclock,
+          pal.payloads[ent.payload],
+          pal
+        );
+        this.impactFlashes.push({
+          x: (cx + neighbor.x + 0.5) * 0.5,
+          y: (cy + neighbor.y + 0.5) * 0.5,
+          maxRadius: 0.56,
+          color: pal.overclock,
+          secondaryColor: pal.overclockLight,
+          age: 0,
+          duration: 0.3,
+          kind: 'SYNERGY_LINK',
+        });
+      } else if (neighbor.kind === 'TOWER' && neighbor.payload !== ent.payload) {
+        ent.synergyPulse = Math.max(ent.synergyPulse, 0.85);
+        neighbor.synergyPulse = Math.max(neighbor.synergyPulse, 0.85);
+        this.particleSystem.emitSynergyLinkLock(
+          cx,
+          cy,
+          neighbor.x + 0.5,
+          neighbor.y + 0.5,
+          pal.payloads[ent.payload],
+          pal.payloads[neighbor.payload],
+          pal
+        );
+      }
+    }
+
+    if (ent.trigger === 'BEAM') {
+      for (const other of this.entities.values()) {
+        if (other.kind !== 'PRISM') continue;
+        if (Math.hypot(other.x - ent.x, other.y - ent.y) <= TRIGGERS.BEAM.range + 0.05) {
+          ent.synergyPulse = 1.0;
+          other.activePulse = 1.0;
+          this.particleSystem.emitSynergyLinkLock(
+            cx,
+            cy,
+            other.x + 0.5,
+            other.y + 0.5,
+            pal.payloads[ent.payload],
+            pal.prism,
+            pal
+          );
+        }
+      }
+    }
+  }
+
+  /** Emits energized conduit sparks from adjacent Overclock node(s) into a firing tower */
+  private emitOverclockFireSurge(
+    tower: TowerEntity,
+    sources: GridPoint[],
+    pal: ReturnType<typeof getActivePalette>
+  ): void {
+    const tx = tower.x + 0.5;
+    const ty = tower.y + 0.5;
+    tower.synergyPulse = Math.max(tower.synergyPulse, 0.72);
+    for (const src of sources) {
+      const oc = this.getEntityAt(src.x, src.y);
+      if (oc && oc.kind === 'OVERCLOCK') {
+        oc.activePulse = 1.0;
+      }
+      this.particleSystem.emitOverclockFlow(src.x + 0.5, src.y + 0.5, tx, ty, true, pal);
+    }
+  }
+
+  /** Emits harmonic sparks between a tower and orthogonally adjacent complementary-payload partners when a combo triggers */
+  private pulseAdjacentElementalPartners(
+    tower: TowerEntity,
+    hadSlow: boolean,
+    hadShred: boolean,
+    pal: ReturnType<typeof getActivePalette>
+  ): void {
+    const dirs = [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+    ];
+    for (const [dx, dy] of dirs) {
+      const neighbor = this.getEntityAt(tower.x + dx, tower.y + dy);
+      if (!neighbor || neighbor.kind !== 'TOWER' || neighbor.payload === tower.payload) continue;
+      const matchesDebuff =
+        (hadSlow && neighbor.payload === 'CRYO') || (hadShred && neighbor.payload === 'CORRODE');
+      if (!matchesDebuff) continue;
+
+      tower.synergyPulse = 1.0;
+      neighbor.synergyPulse = 1.0;
+      this.particleSystem.emitTowerAdjacencyPulse(
+        neighbor.x + 0.5,
+        neighbor.y + 0.5,
+        tower.x + 0.5,
+        tower.y + 0.5,
+        pal.payloads[neighbor.payload],
+        pal.payloads[tower.payload],
+        true,
+        pal
+      );
+    }
+  }
+
+  /** Emits staggered ambient synergy flow particles across Overclock links and adjacent complementary towers */
+  private updateSynergyAmbientFx(): void {
+    const pal = getActivePalette();
+    const orthoAll = [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+    ];
+    const orthoHalf = [
+      [1, 0],
+      [0, 1],
+    ];
+
+    for (const ent of this.entities.values()) {
+      if (ent.kind === 'OVERCLOCK') {
+        const ox = ent.x + 0.5;
+        const oy = ent.y + 0.5;
+        for (const [dx, dy] of orthoAll) {
+          const neighbor = this.getEntityAt(ent.x + dx, ent.y + dy);
+          if (!neighbor || neighbor.kind !== 'TOWER') continue;
+          const phase = (ent.x * 7 + ent.y * 13 + neighbor.x * 5 + neighbor.y * 3) % 28;
+          if (this.tick % 28 === phase) {
+            this.particleSystem.emitOverclockFlow(
+              ox,
+              oy,
+              neighbor.x + 0.5,
+              neighbor.y + 0.5,
+              false,
+              pal
+            );
+          }
+        }
+      } else if (ent.kind === 'TOWER' && (this.waveActive || this.demoMode)) {
+        const tx = ent.x + 0.5;
+        const ty = ent.y + 0.5;
+        for (const [dx, dy] of orthoHalf) {
+          const neighbor = this.getEntityAt(ent.x + dx, ent.y + dy);
+          if (!neighbor || neighbor.kind !== 'TOWER' || neighbor.payload === ent.payload) continue;
+          const phase = (ent.x * 11 + ent.y * 17 + dx * 3 + dy * 5) % 44;
+          if (this.tick % 44 === phase) {
+            this.particleSystem.emitTowerAdjacencyPulse(
+              tx,
+              ty,
+              neighbor.x + 0.5,
+              neighbor.y + 0.5,
+              pal.payloads[ent.payload],
+              pal.payloads[neighbor.payload],
+              false,
+              pal
+            );
+          }
+        }
       }
     }
   }
@@ -1541,6 +2320,8 @@ export class VectraEngine {
       gameOutcome: this.gameOutcome,
       totalKills: this.totalKills,
       totalDamage: Math.round(this.totalDamage),
+      maxTileDamage: Math.round(this.maxTileDamage),
+      hotTileCount: this.hotTileCount,
       mapName: this.mapName,
       pathLength: Math.max(0, this.flowField.spawnDist),
       selectedEntityId: this.selectedEntityId,

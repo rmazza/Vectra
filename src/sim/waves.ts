@@ -1,4 +1,10 @@
 import { EnemyType, MapPreset, WaveDefinition } from './types';
+export {
+  SHUFFLE_DENSITIES,
+  SHUFFLE_DENSITY_LABELS,
+  generateShuffledLayout,
+  type ShuffleDensity,
+} from './boardGen';
 
 export const MAP_PRESETS: MapPreset[] = [
   {

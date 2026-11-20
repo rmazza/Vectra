@@ -8,16 +8,30 @@ import {
 } from '../renderer/canvasRenderer';
 import { VectraEngine } from '../sim/engine';
 import { COSTS } from '../sim/stats';
-import { BuildTool, FIXED_DT, GridPoint, PlacementCheckResult, TowerPreset } from '../sim/types';
+import {
+  BuildTool,
+  CardinalDir,
+  FIXED_DT,
+  GridPoint,
+  PlacementCheckResult,
+  TowerPreset,
+} from '../sim/types';
 import { ThemePalette } from '../theme/palettes';
-import { Check, Maximize2, Minus, Play, Plus, X } from 'lucide-react';
+import { Check, Flame, Maximize2, Minus, Play, Plus, RotateCw, X } from 'lucide-react';
 
 interface GameCanvasProps {
   engine: VectraEngine;
   palette: ThemePalette;
   activeTool: BuildTool;
   activePreset?: TowerPreset | null;
+  conveyorDir?: CardinalDir;
+  onRotateConveyor?: () => void;
   showFlowField: boolean;
+  showHeatmap?: boolean;
+  maxTileDamage?: number;
+  hotTileCount?: number;
+  onClearHeatmap?: () => void;
+  onCloseHeatmap?: () => void;
   obstacleEditMode: boolean;
   interactive: boolean;
   paused?: boolean;
@@ -42,7 +56,14 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   palette,
   activeTool,
   activePreset = null,
+  conveyorDir = 'N',
+  onRotateConveyor,
   showFlowField,
+  showHeatmap = false,
+  maxTileDamage = 0,
+  hotTileCount = 0,
+  onClearHeatmap,
+  onCloseHeatmap,
   obstacleEditMode,
   interactive,
   paused = false,
@@ -90,7 +111,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     palette,
     activeTool,
     activePreset,
+    conveyorDir,
     showFlowField,
+    showHeatmap,
     obstacleEditMode,
     interactive,
     pendingTile,
@@ -100,7 +123,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     palette,
     activeTool,
     activePreset,
+    conveyorDir,
     showFlowField,
+    showHeatmap,
     obstacleEditMode,
     interactive,
     pendingTile,
@@ -172,7 +197,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
             pendingTile: propsRef.current.interactive ? propsRef.current.pendingTile : null,
             activeTool: propsRef.current.activeTool,
             activePreset: propsRef.current.activePreset,
+            conveyorDir: propsRef.current.conveyorDir,
             showFlowField: propsRef.current.showFlowField,
+            showHeatmap: propsRef.current.showHeatmap,
             obstacleEditMode: propsRef.current.obstacleEditMode,
             timeSec: now / 1000,
             camera: cameraRef.current,
@@ -345,6 +372,12 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       ? `Place Overclock · ${COSTS.OVERCLOCK}g`
       : activeTool === 'PRISM'
       ? `Place Prism · ${COSTS.PRISM}g`
+      : activeTool === 'STASIS'
+      ? `Place Stasis · ${COSTS.STASIS}g`
+      : activeTool === 'CONVEYOR'
+      ? `Place Repulsor (${conveyorDir}) · ${COSTS.CONVEYOR}g`
+      : activeTool === 'MINE'
+      ? `Place Mine · ${COSTS.MINE}g`
       : '';
 
   return (
@@ -422,6 +455,75 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         </div>
       )}
 
+      {/* Diagnostic Damage Heatmap Legend Card */}
+      {interactive && showHeatmap && (
+        <div
+          className="pointer-events-auto absolute top-2.5 left-2.5 lg:top-auto lg:bottom-3 lg:left-3 z-10 flex w-[198px] sm:w-[232px] flex-col gap-1.5 rounded-lg border border-[var(--border-strong)] bg-[var(--bg-panel)]/92 p-2.5 shadow-lg backdrop-blur-sm"
+          role="region"
+          aria-label="Damage heatmap diagnostic legend"
+        >
+          <div className="flex items-center justify-between gap-1.5">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <Flame className="h-3.5 w-3.5 shrink-0 text-[var(--pay-kinetic)]" />
+              <span className="truncate font-mono text-[10px] font-bold tracking-wider uppercase text-[var(--text-primary)]">
+                Damage Heatmap
+              </span>
+            </div>
+            <div className="flex items-center gap-1 shrink-0">
+              {onClearHeatmap && (
+                <button
+                  type="button"
+                  onClick={onClearHeatmap}
+                  disabled={maxTileDamage <= 0}
+                  className="rounded border border-[var(--border-subtle)] bg-[var(--bg-inset)] px-1.5 py-0.5 font-mono text-[10px] font-semibold text-[var(--text-secondary)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--text-primary)] disabled:opacity-35 cursor-pointer"
+                  title="Reset recorded tile damage"
+                >
+                  Clear
+                </button>
+              )}
+              {onCloseHeatmap && (
+                <button
+                  type="button"
+                  onClick={onCloseHeatmap}
+                  className="flex h-5 w-5 items-center justify-center rounded text-[var(--text-muted)] transition-colors hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] cursor-pointer"
+                  aria-label="Close damage heatmap"
+                  title="Hide heatmap (Key H)"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div
+            className={`h-2 w-full rounded-sm border border-[var(--border-subtle)] ${
+              palette.isLight
+                ? 'bg-[linear-gradient(to_right,#2563EB,#0D9488,#D97706,#DC2626,#991B1B)]'
+                : 'bg-[linear-gradient(to_right,#247CFF,#2DE09E,#E2F53A,#FF9224,#FF3A2C)]'
+            }`}
+            aria-hidden="true"
+          />
+
+          <div className="flex items-baseline justify-between font-mono text-[10px] tabular-nums">
+            <span className="text-[var(--text-muted)]">0</span>
+            {maxTileDamage > 0 ? (
+              <span className="font-semibold text-[var(--text-primary)]">
+                Peak {maxTileDamage.toLocaleString()} dmg
+              </span>
+            ) : (
+              <span className="text-[var(--text-muted)]">No damage yet</span>
+            )}
+          </div>
+
+          <div className="hidden sm:flex items-center justify-between border-t border-[var(--border-subtle)] pt-1.5 text-[10px] text-[var(--text-muted)]">
+            <span className="font-mono tabular-nums">
+              {hotTileCount} {hotTileCount === 1 ? 'tile' : 'tiles'} hit
+            </span>
+            <span>Hover tile to probe</span>
+          </div>
+        </div>
+      )}
+
       {/* Touch Tap-to-Preview Confirm Floating Action Bar */}
       {interactive && pendingTile && activeTool !== 'INSPECT' && (
         <div className="pointer-events-none absolute inset-x-0 bottom-3 z-20 flex justify-center px-3">
@@ -442,6 +544,18 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
               <span className="px-2.5 py-1.5 text-xs font-semibold text-[var(--signal-danger-text)]">
                 {pendingCheck?.reason || 'Cannot place here'}
               </span>
+            )}
+            {activeTool === 'CONVEYOR' && onRotateConveyor && (
+              <button
+                type="button"
+                onClick={onRotateConveyor}
+                className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-[var(--border-strong)] bg-[var(--bg-inset)] px-2.5 py-2 font-mono text-xs font-semibold text-[var(--text-primary)] hover:bg-[var(--bg-elevated)] cursor-pointer"
+                aria-label="Rotate repulsor direction"
+                title="Rotate direction (Q)"
+              >
+                <RotateCw className="h-3.5 w-3.5 text-[var(--signal-ok)]" />
+                {conveyorDir}
+              </button>
             )}
             <button
               type="button"

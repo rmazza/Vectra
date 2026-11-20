@@ -12,7 +12,8 @@ export type SoundEvent =
   | 'WAVE_CLEAR'
   | 'BREACH'
   | 'VICTORY'
-  | 'GAME_OVER';
+  | 'GAME_OVER'
+  | 'COUNTDOWN_TICK';
 
 class SoundEngine {
   private ctx: AudioContext | null = null;
@@ -156,6 +157,19 @@ class SoundEngine {
           [240, 200, 155].forEach((freq, i) => {
             this.playTone(ctx, 'sawtooth', freq, null, null, 0.07, t + i * 0.14, 0.35, 0.37);
           });
+          break;
+        case 'COUNTDOWN_TICK':
+          this.playTone(
+            ctx,
+            'sine',
+            vol > 1 ? 880 : 660,
+            null,
+            null,
+            0.042 * Math.min(1.2, vol),
+            t,
+            0.06,
+            0.065
+          );
           break;
       }
     } catch {

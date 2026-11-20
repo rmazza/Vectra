@@ -107,7 +107,10 @@ export function getEnemyDistToGoal(enemy: EnemyEntity, flow: FlowFieldData): num
 }
 
 export function getEnemyCurrentSpeed(enemy: EnemyEntity): number {
-  return enemy.slowTimer > 0 ? enemy.baseSpeed * 0.65 : enemy.baseSpeed;
+  let mult = 1.0;
+  if (enemy.slowTimer > 0) mult *= 0.65;
+  if (enemy.stasisTimer > 0) mult *= 0.55;
+  return enemy.baseSpeed * Math.max(0.36, mult);
 }
 
 function matchesCondition(enemy: EnemyEntity, condition: TargetCondition): boolean {

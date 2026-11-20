@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import {
   COSTS,
   ENEMY_ARCHETYPES,
+  FLOOR_STATS,
   MODIFIERS,
   PAYLOADS,
   PRISM_RADIUS,
@@ -14,6 +15,8 @@ import {
   createRule,
 } from '../sim/targeting';
 import {
+  CardinalDir,
+  FloorEntity,
   HudSnapshot,
   ModifierType,
   PayloadType,
@@ -25,18 +28,42 @@ import {
   TriggerType,
 } from '../sim/types';
 import { ThemePalette } from '../theme/palettes';
-import { ArrowDown, ArrowUp, BookmarkPlus, Check, Plus, Trash2, X } from 'lucide-react';
+import {
+  ArrowDown,
+  ArrowUp,
+  BookmarkPlus,
+  Check,
+  Pause,
+  Play,
+  Plus,
+  Timer,
+  TimerOff,
+  Trash2,
+  X,
+} from 'lucide-react';
+import { AutoWaveDuration } from './TopHud';
 
 interface InspectorPanelProps {
   hud: HudSnapshot;
   palette: ThemePalette;
   mobileSheetOpen: boolean;
+  autoWaveEnabled: boolean;
+  autoWaveDuration: AutoWaveDuration;
+  countdownRemaining: number | null;
+  countdownTotal: number;
+  countdownHeld: boolean;
+  onToggleAutoWave: () => void;
+  onStartCountdownNow: () => void;
+  onToggleCountdownHold: () => void;
+  onExtendCountdown: (seconds: number) => void;
   onUpdateModule: (
     towerId: string,
     slot: 'trigger' | 'payload' | 'modifier',
     val: TriggerType | PayloadType | ModifierType
   ) => void;
   onSetRules: (towerId: string, rules: TargetRule[]) => void;
+  onSetFloorDirection: (entityId: string, dir: CardinalDir) => void;
+  onUpdateMinePayload: (entityId: string, payload: PayloadType) => void;
   onSell: (entityId: string) => void;
   onSavePreset: (input: {
     name: string;
@@ -51,8 +78,19 @@ export const InspectorPanel: React.FC<InspectorPanelProps> = ({
   hud,
   palette,
   mobileSheetOpen,
+  autoWaveEnabled,
+  autoWaveDuration,
+  countdownRemaining,
+  countdownTotal,
+  countdownHeld,
+  onToggleAutoWave,
+  onStartCountdownNow,
+  onToggleCountdownHold,
+  onExtendCountdown,
   onUpdateModule,
   onSetRules,
+  onSetFloorDirection,
+  onUpdateMinePayload,
   onSell,
   onSavePreset,
   onCloseSelection,
@@ -61,8 +99,19 @@ export const InspectorPanel: React.FC<InspectorPanelProps> = ({
     <InspectorBody
       hud={hud}
       palette={palette}
+      autoWaveEnabled={autoWaveEnabled}
+      autoWaveDuration={autoWaveDuration}
+      countdownRemaining={countdownRemaining}
+      countdownTotal={countdownTotal}
+      countdownHeld={countdownHeld}
+      onToggleAutoWave={onToggleAutoWave}
+      onStartCountdownNow={onStartCountdownNow}
+      onToggleCountdownHold={onToggleCountdownHold}
+      onExtendCountdown={onExtendCountdown}
       onUpdateModule={onUpdateModule}
       onSetRules={onSetRules}
+      onSetFloorDirection={onSetFloorDirection}
+      onUpdateMinePayload={onUpdateMinePayload}
       onSell={onSell}
       onSavePreset={onSavePreset}
       onCloseSelection={onCloseSelection}
@@ -107,8 +156,19 @@ export const InspectorPanel: React.FC<InspectorPanelProps> = ({
 interface InspectorBodyProps {
   hud: HudSnapshot;
   palette: ThemePalette;
+  autoWaveEnabled: boolean;
+  autoWaveDuration: AutoWaveDuration;
+  countdownRemaining: number | null;
+  countdownTotal: number;
+  countdownHeld: boolean;
+  onToggleAutoWave: InspectorPanelProps['onToggleAutoWave'];
+  onStartCountdownNow: InspectorPanelProps['onStartCountdownNow'];
+  onToggleCountdownHold: InspectorPanelProps['onToggleCountdownHold'];
+  onExtendCountdown: InspectorPanelProps['onExtendCountdown'];
   onUpdateModule: InspectorPanelProps['onUpdateModule'];
   onSetRules: InspectorPanelProps['onSetRules'];
+  onSetFloorDirection: InspectorPanelProps['onSetFloorDirection'];
+  onUpdateMinePayload: InspectorPanelProps['onUpdateMinePayload'];
   onSell: InspectorPanelProps['onSell'];
   onSavePreset: InspectorPanelProps['onSavePreset'];
   onCloseSelection: InspectorPanelProps['onCloseSelection'];
@@ -117,8 +177,19 @@ interface InspectorBodyProps {
 const InspectorBody: React.FC<InspectorBodyProps> = ({
   hud,
   palette,
+  autoWaveEnabled,
+  autoWaveDuration,
+  countdownRemaining,
+  countdownTotal,
+  countdownHeld,
+  onToggleAutoWave,
+  onStartCountdownNow,
+  onToggleCountdownHold,
+  onExtendCountdown,
   onUpdateModule,
   onSetRules,
+  onSetFloorDirection,
+  onUpdateMinePayload,
   onSell,
   onSavePreset,
   onCloseSelection,
@@ -129,6 +200,16 @@ const InspectorBody: React.FC<InspectorBodyProps> = ({
   const ent = hud.selectedEntity;
 
   if (!ent) {
+    const countdownActive =
+      countdownRemaining !== null &&
+      !hud.waveActive &&
+      hud.gameOutcome === 'RUNNING' &&
+      Boolean(hud.nextWaveSummary);
+    const countdownPct =
+      countdownActive && countdownTotal > 0
+        ? Math.max(0, Math.min(100, (countdownRemaining / countdownTotal) * 100))
+        : 0;
+
     return (
       <>
         <section className="flex flex-col gap-3">
@@ -157,6 +238,122 @@ const InspectorBody: React.FC<InspectorBodyProps> = ({
               <X className="h-4 w-4" />
             </button>
           </div>
+
+          {/* Optional Auto-Wave Countdown Window Summary */}
+          {!hud.waveActive && hud.gameOutcome === 'RUNNING' && hud.nextWaveSummary && (
+            <div className="flex flex-col gap-2 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-inset)] p-2.5">
+              {countdownActive ? (
+                <>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="flex items-center gap-1.5 text-[11px] font-semibold text-[var(--text-secondary)]">
+                      <Timer className="h-3.5 w-3.5 text-[var(--accent-text)]" />
+                      {countdownHeld ? 'Prep Timer Held' : 'Auto-Launch Window'}
+                    </span>
+                    <span
+                      className={`font-mono text-xs font-bold tabular-nums ${
+                        countdownHeld
+                          ? 'text-[var(--signal-gold)]'
+                          : countdownRemaining <= 3.05
+                          ? 'text-[var(--signal-danger)]'
+                          : countdownRemaining <= 5.5
+                          ? 'text-[var(--signal-gold)]'
+                          : 'text-[var(--accent-text)]'
+                      }`}
+                    >
+                      {countdownRemaining < 10
+                        ? `${countdownRemaining.toFixed(1)}s`
+                        : `${Math.ceil(countdownRemaining)}s`}
+                    </span>
+                  </div>
+                  <div className="h-1.5 w-full overflow-hidden rounded-sm bg-[var(--bg-panel)]">
+                    <div
+                      className={`h-full transition-[background-color] duration-150 ${
+                        countdownHeld
+                          ? 'bg-[var(--text-muted)]'
+                          : countdownRemaining <= 3.05
+                          ? 'bg-[var(--signal-danger)]'
+                          : countdownRemaining <= 5.5
+                          ? 'bg-[var(--signal-gold)]'
+                          : 'bg-[var(--accent)]'
+                      }`}
+                      style={{ width: `${countdownPct}%` }}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between gap-1.5 pt-0.5">
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={onToggleCountdownHold}
+                        className="inline-flex items-center gap-1 rounded border border-[var(--border-strong)] bg-[var(--bg-panel)] px-2 py-1 text-[11px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
+                      >
+                        {countdownHeld ? (
+                          <>
+                            <Play className="h-3 w-3 fill-current" />
+                            Resume
+                          </>
+                        ) : (
+                          <>
+                            <Pause className="h-3 w-3" />
+                            Hold
+                          </>
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onExtendCountdown(10)}
+                        disabled={countdownRemaining >= 59.5}
+                        className="inline-flex items-center gap-0.5 rounded border border-[var(--border-strong)] bg-[var(--bg-panel)] px-2 py-1 font-mono text-[11px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] disabled:opacity-40 cursor-pointer"
+                      >
+                        <Plus className="h-3 w-3" />
+                        10s
+                      </button>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={onToggleAutoWave}
+                      className="text-[11px] font-medium text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer"
+                    >
+                      Disable
+                    </button>
+                  </div>
+                </>
+              ) : autoWaveEnabled ? (
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <Timer className="h-3.5 w-3.5 shrink-0 text-[var(--accent-text)]" />
+                    <span className="truncate text-[11px] text-[var(--text-secondary)]">
+                      {hud.waveIndex === 0
+                        ? `Auto-Wave armed (${autoWaveDuration}s after W1)`
+                        : `Auto-Wave armed (${autoWaveDuration}s)`}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={onStartCountdownNow}
+                    className="shrink-0 rounded border border-[var(--accent)]/60 bg-[var(--accent-soft)] px-2 py-0.5 font-mono text-[10px] font-semibold text-[var(--accent-text)] hover:bg-[var(--accent)] hover:text-[var(--accent-ink)] transition-colors cursor-pointer"
+                  >
+                    Start {autoWaveDuration}s
+                  </button>
+                </div>
+              ) : (
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <TimerOff className="h-3.5 w-3.5 shrink-0 text-[var(--text-muted)]" />
+                    <span className="truncate text-[11px] text-[var(--text-muted)]">
+                      Manual wave launch
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={onToggleAutoWave}
+                    className="shrink-0 rounded border border-[var(--border-strong)] bg-[var(--bg-panel)] px-2 py-0.5 text-[10px] font-semibold text-[var(--text-secondary)] hover:border-[var(--accent)] hover:text-[var(--accent-text)] transition-colors cursor-pointer"
+                  >
+                    Enable {autoWaveDuration}s
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
 
           {hud.nextWaveSummary && (
             <div className="flex flex-col gap-2 border-t border-[var(--border-subtle)] pt-3">
@@ -225,9 +422,27 @@ const InspectorBody: React.FC<InspectorBodyProps> = ({
           </div>
         </section>
 
+        <section className="flex flex-col gap-2.5 border-t border-[var(--border-subtle)] pt-5">
+          <h3 className="text-xs font-semibold text-[var(--text-muted)]">Walkable Floor Tiles</h3>
+          <div className="flex flex-col gap-2 text-xs leading-relaxed text-[var(--text-secondary)]">
+            <p>
+              <span className="font-semibold text-[var(--pay-cryo)]">Stasis Pad:</span> Gravity well
+              that slows enemies (-45%) and pulls them inward without blocking pathing.
+            </p>
+            <p>
+              <span className="font-semibold text-[var(--signal-ok)]">Vector Repulsor:</span> Shoves
+              enemies back along its facing direction (press Q to rotate).
+            </p>
+            <p>
+              <span className="font-semibold text-[var(--accent-text)]">Pulse Mine:</span>{' '}
+              Rechargeable AoE blast pad with swappable Kinetic, Cryo, or Corrode payloads.
+            </p>
+          </div>
+        </section>
+
         <div className="mt-auto border-t border-[var(--border-subtle)] pt-4 text-[11px] leading-relaxed text-[var(--text-muted)]">
-          Tap any placed Tower or Node on the grid to hot-swap modules (free between waves) and
-          edit targeting rules.
+          Tap any placed Tower, Node, or Floor Tile on the grid to configure modules, direction, and
+          targeting rules.
         </div>
       </>
     );
@@ -350,6 +565,244 @@ const InspectorBody: React.FC<InspectorBodyProps> = ({
         >
           <Trash2 className="h-3.5 w-3.5" />
           Sell Node (+{refund}g{fullRefund ? ' · 100%' : ''})
+        </button>
+      </>
+    );
+  }
+
+  // Walkable Tactical Floor Tile Inspector
+  if (ent.kind === 'STASIS' || ent.kind === 'CONVEYOR' || ent.kind === 'MINE') {
+    const floor = ent as FloorEntity;
+    const fullRefund = !hud.waveActive && floor.placedInWave === -1;
+    const refund = fullRefund ? floor.investedGold : Math.round(floor.investedGold * 0.8);
+    const swapFee = hud.waveActive ? COSTS.MID_WAVE_SWAP : 0;
+    const title =
+      floor.kind === 'STASIS'
+        ? 'Stasis Pad'
+        : floor.kind === 'CONVEYOR'
+        ? 'Vector Repulsor'
+        : 'Pulse Mine';
+    const titleColor =
+      floor.kind === 'STASIS'
+        ? 'text-[var(--pay-cryo)]'
+        : floor.kind === 'CONVEYOR'
+        ? 'text-[var(--signal-ok)]'
+        : 'text-[var(--accent-text)]';
+
+    const dirLabels: Record<CardinalDir, string> = {
+      N: 'North ↑',
+      E: 'East →',
+      S: 'South ↓',
+      W: 'West ←',
+    };
+
+    return (
+      <>
+        <div className="flex items-start justify-between gap-2">
+          <div>
+            <h2
+              className={`text-base font-bold ${titleColor}`}
+              style={{ fontFamily: 'var(--font-display)' }}
+            >
+              {title}
+            </h2>
+            <p className="font-mono text-xs text-[var(--text-muted)] tabular-nums">
+              Grid ({floor.x}, {floor.y}) · Walkable Floor
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onCloseSelection}
+            className="flex h-10 w-10 lg:h-8 lg:w-8 items-center justify-center rounded-md text-[var(--text-muted)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] cursor-pointer"
+            aria-label="Close inspector"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <p className="text-xs leading-relaxed text-[var(--text-secondary)]">
+          {floor.kind === 'STASIS'
+            ? `Walkable gravity well. Slows enemies by ${Math.round(
+                (1 - FLOOR_STATS.STASIS_SLOW_MULT) * 100
+              )}% and gently pulls them toward the tile center inside a ${FLOOR_STATS.STASIS_RADIUS.toFixed(
+                2
+              )}-tile field—ideal inside killbox corners.`
+            : floor.kind === 'CONVEYOR'
+            ? 'Walkable directional repulsor pad. Applies steady belt drift plus a crisp impulse shove along its facing direction (2.35s per-enemy cooldown prevents soft-locks).'
+            : `Walkable proximity blast pad. Triggers when an enemy crosses within ${FLOOR_STATS.MINE_TRIGGER_RADIUS.toFixed(
+                2
+              )} tiles, dealing AoE elemental damage in a ${FLOOR_STATS.MINE_BLAST_RADIUS.toFixed(
+                2
+              )}-tile radius and recharging every ${FLOOR_STATS.MINE_RECHARGE_SEC.toFixed(
+                1
+              )}s (auto-rearms each wave).`}
+        </p>
+
+        {floor.kind === 'STASIS' && (
+          <div className="grid grid-cols-2 gap-3 border-y border-[var(--border-subtle)] py-4 font-mono tabular-nums">
+            <div className="flex flex-col gap-0.5">
+              <span className="font-sans text-[11px] text-[var(--text-muted)]">Movement Slow</span>
+              <span className="text-base font-semibold text-[var(--pay-cryo)]">
+                -{Math.round((1 - FLOOR_STATS.STASIS_SLOW_MULT) * 100)}%
+              </span>
+            </div>
+            <div className="flex flex-col gap-0.5">
+              <span className="font-sans text-[11px] text-[var(--text-muted)]">Field Radius</span>
+              <span className="text-base font-semibold text-[var(--text-primary)]">
+                {FLOOR_STATS.STASIS_RADIUS.toFixed(2)} tiles
+              </span>
+            </div>
+          </div>
+        )}
+
+        {floor.kind === 'CONVEYOR' && (
+          <>
+            <div className="grid grid-cols-2 gap-3 border-y border-[var(--border-subtle)] py-4 font-mono tabular-nums">
+              <div className="flex flex-col gap-0.5">
+                <span className="font-sans text-[11px] text-[var(--text-muted)]">Push Vector</span>
+                <span className="text-base font-semibold text-[var(--signal-ok)]">
+                  {dirLabels[floor.direction]}
+                </span>
+              </div>
+              <div className="flex flex-col gap-0.5">
+                <span className="font-sans text-[11px] text-[var(--text-muted)]">Total Shoves</span>
+                <span className="text-base font-semibold text-[var(--text-primary)]">
+                  {floor.triggers}
+                </span>
+              </div>
+            </div>
+
+            <section className="flex flex-col gap-2">
+              <div className="flex items-baseline justify-between">
+                <h3 className="text-xs font-semibold text-[var(--text-secondary)]">
+                  Push Direction
+                </h3>
+                <span className="font-mono text-[11px] text-[var(--text-muted)]">
+                  Free · Key Q to rotate
+                </span>
+              </div>
+              <div className="grid grid-cols-4 gap-1 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-inset)] p-1">
+                {(['N', 'E', 'S', 'W'] as const).map((d) => {
+                  const active = floor.direction === d;
+                  const arrows: Record<CardinalDir, string> = {
+                    N: '↑ N',
+                    E: '→ E',
+                    S: '↓ S',
+                    W: '← W',
+                  };
+                  return (
+                    <button
+                      key={d}
+                      type="button"
+                      onClick={() => onSetFloorDirection(floor.id, d)}
+                      className={`min-h-[40px] lg:min-h-0 rounded px-2 py-1.5 font-mono text-xs font-semibold transition-colors duration-150 cursor-pointer ${
+                        active
+                          ? 'bg-[var(--bg-elevated)] text-[var(--signal-ok)]'
+                          : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+                      }`}
+                    >
+                      {arrows[d]}
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+          </>
+        )}
+
+        {floor.kind === 'MINE' && (
+          <>
+            <div className="grid grid-cols-2 gap-3 border-y border-[var(--border-subtle)] py-4 font-mono tabular-nums">
+              <div className="flex flex-col gap-0.5">
+                <span className="font-sans text-[11px] text-[var(--text-muted)]">Status</span>
+                <span
+                  className={`text-sm font-semibold ${
+                    floor.cooldown <= 0
+                      ? 'text-[var(--signal-ok)]'
+                      : 'text-[var(--signal-gold)]'
+                  }`}
+                >
+                  {floor.cooldown <= 0 ? 'Armed' : `Recharging ${floor.cooldown.toFixed(1)}s`}
+                </span>
+              </div>
+              <div className="flex flex-col gap-0.5">
+                <span className="font-sans text-[11px] text-[var(--text-muted)]">Blast DMG</span>
+                <span className="text-sm font-semibold text-[var(--text-primary)]">
+                  {Math.round(FLOOR_STATS.MINE_BASE_DAMAGE * PAYLOADS[floor.payload].dmgMult)}
+                </span>
+              </div>
+              <div className="flex flex-col gap-0.5">
+                <span className="font-sans text-[11px] text-[var(--text-muted)]">Detonations</span>
+                <span className="text-sm font-semibold text-[var(--text-primary)]">
+                  {floor.triggers}
+                </span>
+              </div>
+              <div className="flex flex-col gap-0.5">
+                <span className="font-sans text-[11px] text-[var(--text-muted)]">Total Damage</span>
+                <span className="text-sm font-semibold text-[var(--accent-text)]">
+                  {Math.round(floor.totalDamage)} ({floor.kills} kills)
+                </span>
+              </div>
+            </div>
+
+            <section className="flex flex-col gap-2">
+              <div className="flex items-baseline justify-between">
+                <h3 className="text-xs font-semibold text-[var(--text-secondary)]">
+                  Warhead Payload
+                </h3>
+                <span
+                  className={`font-mono text-[11px] ${
+                    swapFee > 0 && hud.gold < swapFee
+                      ? 'font-semibold text-[var(--signal-danger)]'
+                      : 'text-[var(--text-muted)]'
+                  }`}
+                >
+                  {swapFee === 0
+                    ? 'Free swap'
+                    : hud.gold < swapFee
+                    ? `Need ${swapFee}g`
+                    : `${swapFee}g mid-wave swap`}
+                </span>
+              </div>
+              <div className="grid grid-cols-3 gap-1 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-inset)] p-1">
+                {(['KINETIC', 'CRYO', 'CORRODE'] as const).map((p) => {
+                  const active = floor.payload === p;
+                  const activeText =
+                    p === 'KINETIC'
+                      ? 'text-[var(--pay-kinetic)]'
+                      : p === 'CRYO'
+                      ? 'text-[var(--pay-cryo)]'
+                      : 'text-[var(--pay-corrode)]';
+                  return (
+                    <button
+                      key={p}
+                      type="button"
+                      onClick={() => onUpdateMinePayload(floor.id, p)}
+                      className={`min-h-[40px] lg:min-h-0 rounded px-2 py-1.5 text-xs font-semibold transition-colors duration-150 whitespace-nowrap cursor-pointer ${
+                        active
+                          ? `bg-[var(--bg-elevated)] ${activeText}`
+                          : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+                      }`}
+                    >
+                      {PAYLOADS[p].label}
+                    </button>
+                  );
+                })}
+              </div>
+              <span className="text-[11px] text-[var(--text-muted)]">
+                {PAYLOADS[floor.payload].shortDesc}
+              </span>
+            </section>
+          </>
+        )}
+
+        <button
+          type="button"
+          onClick={() => onSell(floor.id)}
+          className="mt-auto inline-flex min-h-[44px] items-center justify-center gap-2 rounded-md border border-[var(--signal-danger)]/45 bg-[var(--signal-danger-soft)] px-4 py-2.5 text-xs font-semibold text-[var(--signal-danger-text)] transition-colors duration-150 hover:border-[var(--signal-danger)] cursor-pointer"
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+          Sell Floor Tile (+{refund}g{fullRefund ? ' · 100%' : ''})
         </button>
       </>
     );

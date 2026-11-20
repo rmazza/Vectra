@@ -1,6 +1,9 @@
 import {
+  BuildTool,
+  CardinalDir,
   ComputedTowerStats,
   EnemyType,
+  FloorKind,
   GridEntity,
   GridPoint,
   ModifierType,
@@ -15,8 +18,55 @@ export const COSTS = {
   PRESET_PREMIUM: 15,
   OVERCLOCK: 45,
   PRISM: 55,
+  STASIS: 35,
+  CONVEYOR: 30,
+  MINE: 40,
   MID_WAVE_SWAP: 5, // 10% fee during active wave; free between waves
 } as const;
+
+export const FLOOR_STATS = {
+  STASIS_RADIUS: 1.45,
+  STASIS_SLOW_MULT: 0.55, // -45% speed while inside well
+  STASIS_PULL_SPEED: 0.45, // tiles/sec gentle gravity pull toward well center
+  CONVEYOR_PUSH_SPEED: 3.3, // tiles/sec impulse burst
+  CONVEYOR_PUSH_DURATION: 0.28, // seconds (~0.92 tiles shove)
+  CONVEYOR_DRIFT_SPEED: 0.48, // gentle ongoing belt force
+  CONVEYOR_ENEMY_COOLDOWN: 2.35, // prevents infinite push-loops
+  MINE_TRIGGER_RADIUS: 0.58,
+  MINE_BLAST_RADIUS: 1.55,
+  MINE_BASE_DAMAGE: 48,
+  MINE_RECHARGE_SEC: 5.5,
+} as const;
+
+export function isFloorKind(kind: BuildTool | string): kind is FloorKind {
+  return kind === 'STASIS' || kind === 'CONVEYOR' || kind === 'MINE';
+}
+
+export function dirToVector(dir: CardinalDir): { dx: number; dy: number; angle: number } {
+  switch (dir) {
+    case 'N':
+      return { dx: 0, dy: -1, angle: -Math.PI / 2 };
+    case 'E':
+      return { dx: 1, dy: 0, angle: 0 };
+    case 'S':
+      return { dx: 0, dy: 1, angle: Math.PI / 2 };
+    case 'W':
+      return { dx: -1, dy: 0, angle: Math.PI };
+  }
+}
+
+export function rotateDirCW(dir: CardinalDir): CardinalDir {
+  switch (dir) {
+    case 'N':
+      return 'E';
+    case 'E':
+      return 'S';
+    case 'S':
+      return 'W';
+    case 'W':
+      return 'N';
+  }
+}
 
 export const BASE_TOWER = {
   damage: 18,

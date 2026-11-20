@@ -1,10 +1,11 @@
 import React from 'react';
 import { HudSnapshot } from '../sim/types';
-import { RotateCcw, Share2 } from 'lucide-react';
+import { RotateCcw, Share2, Shuffle } from 'lucide-react';
 
 interface EndModalProps {
   hud: HudSnapshot;
   onPlayAgain: () => void;
+  onShuffleNew: () => void;
   onReturnTitle: () => void;
   onShareSeed: () => void;
 }
@@ -12,6 +13,7 @@ interface EndModalProps {
 export const EndModal: React.FC<EndModalProps> = ({
   hud,
   onPlayAgain,
+  onShuffleNew,
   onReturnTitle,
   onShareSeed,
 }) => {
@@ -82,6 +84,16 @@ export const EndModal: React.FC<EndModalProps> = ({
           >
             <RotateCcw className="h-4 w-4" />
             Play Again
+          </button>
+
+          <button
+            type="button"
+            onClick={onShuffleNew}
+            className="inline-flex items-center justify-center gap-1.5 rounded-md border border-[var(--border-strong)] bg-[var(--bg-inset)] px-3.5 py-2.5 text-xs font-semibold text-[var(--text-primary)] transition-colors hover:border-[var(--accent)] hover:bg-[var(--bg-elevated)] whitespace-nowrap cursor-pointer"
+            title="Start a new run on a freshly shuffled board"
+          >
+            <Shuffle className="h-3.5 w-3.5 text-[var(--accent-text)]" />
+            Shuffle
           </button>
 
           <button

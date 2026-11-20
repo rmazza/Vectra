@@ -17,6 +17,19 @@ function traceRegularPolygon(
   ctx.closePath();
 }
 
+function drawCrystalGlyph(ctx: CanvasRenderingContext2D, r: number): void {
+  // Crisp 6-spoke vector snowflake / frost crystal
+  ctx.beginPath();
+  for (let i = 0; i < 3; i++) {
+    const a = (i * Math.PI) / 3;
+    const cx = Math.cos(a) * r;
+    const cy = Math.sin(a) * r;
+    ctx.moveTo(-cx, -cy);
+    ctx.lineTo(cx, cy);
+  }
+  ctx.stroke();
+}
+
 function drawDebrisParticle(
   ctx: CanvasRenderingContext2D,
   pt: VectorParticle,
@@ -84,6 +97,17 @@ function drawDebrisParticle(
       ctx.stroke();
       break;
     }
+    case 'CRYSTAL': {
+      drawCrystalGlyph(ctx, s * 1.05);
+      break;
+    }
+    case 'RING': {
+      const expand = 0.45 + 0.95 * (1 - life);
+      ctx.beginPath();
+      ctx.arc(0, 0, Math.max(1.2, s * expand), 0, Math.PI * 2);
+      ctx.stroke();
+      break;
+    }
     case 'SHARD':
     default: {
       // Sharp asymmetric triangular metal/crystal splinter
@@ -96,6 +120,104 @@ function drawDebrisParticle(
       if (pt.outlined) ctx.stroke();
       else ctx.fill();
       break;
+    }
+  }
+
+  ctx.restore();
+}
+
+function drawMoteParticle(
+  ctx: CanvasRenderingContext2D,
+  pt: VectorParticle,
+  ts: number,
+  scale: number,
+  pal: ThemePalette
+): void {
+  const progress = Math.max(0, Math.min(1, pt.age / Math.max(0.001, pt.duration)));
+  const life = 1 - progress;
+  // Smooth fade-in and fade-out envelope for guided synergy & elemental motes
+  const isGuided = pt.targetX !== undefined;
+  const alpha = isGuided
+    ? Math.sin(progress * Math.PI) * (pal.isLight ? 0.94 : 0.92)
+    : Math.pow(life, 0.7) * (pal.isLight ? 0.9 : 0.88);
+  if (alpha <= 0.02) return;
+
+  const px = pt.x * ts;
+  const py = pt.y * ts;
+  const s = Math.max(
+    1.0,
+    pt.size * (pt.shape === 'RING' ? 0.5 + progress * 1.25 : 0.45 + 0.55 * life) * scale
+  );
+
+  ctx.save();
+  ctx.translate(px, py);
+  ctx.rotate(pt.rotation);
+  ctx.globalAlpha = alpha;
+  ctx.strokeStyle = pt.color;
+  ctx.fillStyle = pt.color;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'miter';
+
+  if (pt.shape === 'RING') {
+    ctx.lineWidth = Math.max(1.0, (1.1 + life * 1.1) * scale);
+    ctx.beginPath();
+    ctx.arc(0, 0, s, 0, Math.PI * 2);
+    ctx.stroke();
+
+    if (pt.coreColor) {
+      ctx.strokeStyle = pt.coreColor;
+      ctx.globalAlpha = alpha * 0.58;
+      ctx.lineWidth = Math.max(0.8, 0.9 * scale);
+      ctx.beginPath();
+      ctx.arc(0, 0, Math.max(0.8, s * 0.55), 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  } else if (pt.shape === 'CRYSTAL') {
+    ctx.lineWidth = Math.max(1.1, 1.35 * scale);
+    drawCrystalGlyph(ctx, s * 1.15);
+    if (pt.coreColor && !pal.isLight) {
+      ctx.fillStyle = pt.coreColor;
+      ctx.beginPath();
+      ctx.arc(0, 0, Math.max(0.9, s * 0.28), 0, Math.PI * 2);
+      ctx.fill();
+    }
+  } else if (pt.shape === 'CHEVRON') {
+    ctx.lineWidth = Math.max(1.3, s * 0.72);
+    ctx.beginPath();
+    ctx.moveTo(-s * 1.15, -s * 0.95);
+    ctx.lineTo(s * 0.95, 0);
+    ctx.lineTo(-s * 1.15, s * 0.95);
+    ctx.stroke();
+    if (pt.coreColor && !pal.isLight) {
+      ctx.strokeStyle = pt.coreColor;
+      ctx.globalAlpha = alpha * 0.82;
+      ctx.lineWidth = Math.max(0.7, s * 0.3);
+      ctx.stroke();
+    }
+  } else if (pt.shape === 'HEX') {
+    ctx.lineWidth = Math.max(1.1, 1.25 * scale);
+    traceRegularPolygon(ctx, s * 0.9, 6);
+    if (pt.outlined) ctx.stroke();
+    else ctx.fill();
+  } else {
+    // Crisp vector diamond conduit mote
+    ctx.lineWidth = Math.max(1.1, 1.3 * scale);
+    ctx.beginPath();
+    ctx.moveTo(0, -s * 0.95);
+    ctx.lineTo(s * 0.68, 0);
+    ctx.lineTo(0, s * 0.95);
+    ctx.lineTo(-s * 0.68, 0);
+    ctx.closePath();
+    if (pt.outlined) {
+      ctx.stroke();
+    } else {
+      ctx.fill();
+      if (pt.coreColor && !pal.isLight) {
+        ctx.fillStyle = pt.coreColor;
+        ctx.beginPath();
+        ctx.arc(0, 0, Math.max(0.8, s * 0.28), 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
   }
 
@@ -205,7 +327,18 @@ export function renderVectorParticles(
   }
   ctx.restore();
 
-  // Pass 2: Velocity-Stretched Luminous Vector Sparks (additive on dark themes, crisp ink on light paper)
+  // Pass 2: Guided Synergy Conduits & Elemental Motes (crystals, rings, harmonic diamonds)
+  ctx.save();
+  ctx.globalCompositeOperation = pal.isLight ? 'source-over' : 'lighter';
+  for (let i = 0; i < items.length; i++) {
+    const pt = items[i];
+    if (pt.kind === 'MOTE') {
+      drawMoteParticle(ctx, pt, ts, scale, pal);
+    }
+  }
+  ctx.restore();
+
+  // Pass 3: Velocity-Stretched Luminous Vector Sparks (additive on dark themes, crisp ink on light paper)
   ctx.save();
   ctx.globalCompositeOperation = pal.isLight ? 'source-over' : 'lighter';
   for (let i = 0; i < items.length; i++) {

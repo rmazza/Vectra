@@ -1,24 +1,35 @@
 import React from 'react';
 import { MapPreset } from '../sim/types';
-import { MAP_PRESETS } from '../sim/waves';
+import {
+  MAP_PRESETS,
+  SHUFFLE_DENSITIES,
+  SHUFFLE_DENSITY_LABELS,
+  ShuffleDensity,
+} from '../sim/waves';
 import { PALETTES, THEME_ORDER, ThemeId, ThemePalette } from '../theme/palettes';
-import { Play, Upload } from 'lucide-react';
+import { Play, Shuffle, Upload } from 'lucide-react';
 
 interface TitleScreenProps {
-  selectedPresetId: string;
+  selectedPreset: MapPreset;
+  shuffleDensity: ShuffleDensity;
   themeId: ThemeId;
   palette: ThemePalette;
   onSelectPreset: (preset: MapPreset) => void;
+  onShuffleLayout: (densityOverride?: ShuffleDensity) => void;
+  onSelectShuffleDensity: (density: ShuffleDensity) => void;
   onSelectTheme: (id: ThemeId) => void;
   onStart: () => void;
   onOpenSeedImport: () => void;
 }
 
 export const TitleScreen: React.FC<TitleScreenProps> = ({
-  selectedPresetId,
+  selectedPreset,
+  shuffleDensity,
   themeId,
   palette,
   onSelectPreset,
+  onShuffleLayout,
+  onSelectShuffleDensity,
   onSelectTheme,
   onStart,
   onOpenSeedImport,
@@ -28,6 +39,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
   const brandInnerFill = palette.isLight
     ? 'rgba(224, 58, 38, 0.16)'
     : `rgba(${palette.prismFloorRgb}, 0.22)`;
+  const isShuffledActive = !MAP_PRESETS.some((p) => p.id === selectedPreset.id);
 
   return (
     <div className="title-scrim pointer-events-none absolute inset-0 z-20 flex items-end sm:items-center overflow-y-auto">
@@ -80,24 +92,31 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
           </p>
         </div>
 
-        {/* Map Preset Selector */}
+        {/* Map Preset & Shuffle Selector */}
         <div className="flex flex-col gap-2">
-          <span className="text-xs font-medium text-[var(--text-muted)]">Select Arena Layout</span>
-          <div className="grid grid-cols-3 gap-2 sm:gap-2.5">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs font-medium text-[var(--text-muted)]">Select Arena Layout</span>
+            {isShuffledActive && (
+              <span className="font-mono text-[11px] font-semibold text-[var(--accent-text)]">
+                {selectedPreset.name} · {selectedPreset.obstacles.length} walls
+              </span>
+            )}
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-2.5">
             {MAP_PRESETS.map((preset) => {
-              const active = preset.id === selectedPresetId;
+              const active = preset.id === selectedPreset.id;
               return (
                 <button
                   key={preset.id}
                   type="button"
                   onClick={() => onSelectPreset(preset)}
-                  className={`flex min-h-[54px] flex-col items-start justify-center gap-0.5 rounded-md border px-2.5 py-2 sm:px-3.5 sm:py-2.5 text-left transition-colors duration-150 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)] cursor-pointer ${
+                  className={`flex min-h-[54px] flex-col items-start justify-center gap-0.5 rounded-md border px-2.5 py-2 sm:px-3 sm:py-2.5 text-left transition-colors duration-150 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)] cursor-pointer ${
                     active
                       ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--text-primary)]'
                       : 'border-[var(--border-subtle)] bg-[var(--bg-panel)]/90 text-[var(--text-secondary)] hover:border-[var(--border-strong)] hover:text-[var(--text-primary)]'
                   }`}
                 >
-                  <span className="w-full truncate text-xs sm:text-sm font-semibold">
+                  <span className="w-full truncate text-xs sm:text-[13px] font-semibold">
                     {preset.name}
                   </span>
                   <span className="text-[10px] sm:text-[11px] text-[var(--text-muted)] tabular-nums">
@@ -106,10 +125,54 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
                 </button>
               );
             })}
+
+            <button
+              type="button"
+              onClick={() => onShuffleLayout()}
+              className={`flex min-h-[54px] flex-col items-start justify-center gap-0.5 rounded-md border px-2.5 py-2 sm:px-3 sm:py-2.5 text-left transition-colors duration-150 active:scale-[0.98] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)] cursor-pointer ${
+                isShuffledActive
+                  ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--text-primary)]'
+                  : 'border-[var(--border-subtle)] bg-[var(--bg-panel)]/90 text-[var(--text-secondary)] hover:border-[var(--border-strong)] hover:text-[var(--text-primary)]'
+              }`}
+              title="Generate a fresh shuffled board layout (Key S)"
+            >
+              <span className="flex w-full items-center gap-1.5 text-xs sm:text-[13px] font-semibold">
+                <Shuffle className="h-3.5 w-3.5 text-[var(--accent-text)] shrink-0" />
+                <span className="truncate">{isShuffledActive ? 'Re-Shuffle' : 'Shuffle'}</span>
+              </span>
+              <span className="text-[10px] sm:text-[11px] text-[var(--text-muted)] tabular-nums">
+                {isShuffledActive ? `${selectedPreset.obstacles.length} walls` : '10 archetypes'}
+              </span>
+            </button>
           </div>
-          <p className="text-xs text-[var(--text-muted)]">
-            {MAP_PRESETS.find((p) => p.id === selectedPresetId)?.description}
-          </p>
+
+          {isShuffledActive && (
+            <div className="flex items-center justify-between gap-2 pt-0.5">
+              <span className="text-[11px] text-[var(--text-muted)]">Shuffle Density</span>
+              <div
+                className="inline-flex items-center rounded-md border border-[var(--border-subtle)] bg-[var(--bg-panel)]/90 p-0.5"
+                role="group"
+                aria-label="Shuffle obstacle density"
+              >
+                {SHUFFLE_DENSITIES.map((d) => (
+                  <button
+                    key={d}
+                    type="button"
+                    onClick={() => onSelectShuffleDensity(d)}
+                    className={`rounded px-2 py-0.5 font-mono text-[11px] font-semibold transition-colors cursor-pointer ${
+                      shuffleDensity === d
+                        ? 'bg-[var(--bg-elevated)] text-[var(--accent-text)]'
+                        : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+                    }`}
+                  >
+                    {SHUFFLE_DENSITY_LABELS[d]}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <p className="text-xs text-[var(--text-muted)]">{selectedPreset.description}</p>
         </div>
 
         {/* Palette Selector */}
@@ -180,11 +243,11 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
         <div className="hidden sm:flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs text-[var(--text-muted)] font-mono">
           <span>Enter Start</span>
           <span aria-hidden="true">·</span>
-          <span>1–3 Build</span>
+          <span>S Shuffle</span>
+          <span aria-hidden="true">·</span>
+          <span>1–6 Build</span>
           <span aria-hidden="true">·</span>
           <span>Space Wave / Pause</span>
-          <span aria-hidden="true">·</span>
-          <span>F Speed</span>
           <span aria-hidden="true">·</span>
           <span>T Palette</span>
         </div>

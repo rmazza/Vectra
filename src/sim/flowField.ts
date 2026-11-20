@@ -17,7 +17,14 @@ export function inBounds(x: number, y: number): boolean {
 }
 
 export function isPassable(tile: TileKind): boolean {
-  return tile === 'EMPTY' || tile === 'SPAWN' || tile === 'GOAL';
+  return (
+    tile === 'EMPTY' ||
+    tile === 'SPAWN' ||
+    tile === 'GOAL' ||
+    tile === 'STASIS' ||
+    tile === 'CONVEYOR' ||
+    tile === 'MINE'
+  );
 }
 
 const ORTHO_DIRS: readonly [number, number][] = [
@@ -206,4 +213,26 @@ export function validatePlacement(
     valid: true,
     previewPath: dryFlow.pathTiles,
   };
+}
+
+/**
+ * Placement validation for walkable floor tiles (Stasis, Conveyor, Mine):
+ * They never block enemy pathfinding, so they only require an in-bounds EMPTY tile.
+ */
+export function validateFloorPlacement(
+  grid: TileKind[],
+  x: number,
+  y: number
+): PlacementCheckResult {
+  if (!inBounds(x, y)) {
+    return { valid: false, reason: 'Out of bounds' };
+  }
+  const idx = tileIndex(x, y);
+  if (grid[idx] !== 'EMPTY') {
+    if (grid[idx] === 'SPAWN') return { valid: false, reason: 'Spawn tile' };
+    if (grid[idx] === 'GOAL') return { valid: false, reason: 'Goal core' };
+    if (grid[idx] === 'OBSTACLE') return { valid: false, reason: 'Static obstacle' };
+    return { valid: false, reason: 'Tile occupied' };
+  }
+  return { valid: true };
 }

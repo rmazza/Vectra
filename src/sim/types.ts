@@ -5,9 +5,21 @@ export const FIXED_DT = 1 / FIXED_HZ;
 
 export type GamePhase = 'TITLE_MENU' | 'PLAYING' | 'PAUSED' | 'VICTORY' | 'GAME_OVER';
 
-export type TileKind = 'EMPTY' | 'SPAWN' | 'GOAL' | 'OBSTACLE' | 'TOWER' | 'OVERCLOCK' | 'PRISM';
+export type FloorKind = 'STASIS' | 'CONVEYOR' | 'MINE';
 
-export type BuildTool = 'INSPECT' | 'TOWER' | 'OVERCLOCK' | 'PRISM';
+export type CardinalDir = 'N' | 'E' | 'S' | 'W';
+
+export type TileKind =
+  | 'EMPTY'
+  | 'SPAWN'
+  | 'GOAL'
+  | 'OBSTACLE'
+  | 'TOWER'
+  | 'OVERCLOCK'
+  | 'PRISM'
+  | FloorKind;
+
+export type BuildTool = 'INSPECT' | 'TOWER' | 'OVERCLOCK' | 'PRISM' | FloorKind;
 
 export type TriggerType = 'PULSE' | 'BEAM' | 'NOVA';
 export type PayloadType = 'KINETIC' | 'CRYO' | 'CORRODE';
@@ -71,6 +83,7 @@ export interface TowerEntity {
   totalDamage: number;
   kills: number;
   recoil: number; // 0..1 visual kick
+  synergyPulse: number; // 0..1 visual resonance flash from adjacent synergies
 }
 
 export interface UtilityNodeEntity {
@@ -85,7 +98,27 @@ export interface UtilityNodeEntity {
   prismBeamTargets: string[];
 }
 
-export type GridEntity = TowerEntity | UtilityNodeEntity;
+export interface FloorEntity {
+  id: string;
+  kind: FloorKind;
+  x: number;
+  y: number;
+  investedGold: number;
+  placedInWave: number;
+  activePulse: number; // 0..1 visual energy glow
+  // Conveyor direction
+  direction: CardinalDir;
+  // Mine payload & recharge state
+  payload: PayloadType;
+  cooldown: number; // seconds until armed (0 = armed)
+  maxCooldown: number;
+  // Telemetry
+  triggers: number;
+  totalDamage: number;
+  kills: number;
+}
+
+export type GridEntity = TowerEntity | UtilityNodeEntity | FloorEntity;
 
 export interface EnemyEntity {
   id: string;
@@ -108,6 +141,15 @@ export interface EnemyEntity {
   // Status effects (remaining seconds)
   slowTimer: number;
   shredTimer: number;
+  stasisTimer: number;
+  // Repulsor conveyor knockback state
+  repulseCooldown: number;
+  knockVx: number;
+  knockVy: number;
+  knockTimer: number;
+  // Elemental particle FX throttles
+  reactionFxCooldown: number;
+  statusFxTimer: number;
   // Visual juice
   hitFlash: number;
   shieldFlash: number;
@@ -190,9 +232,16 @@ export interface ImpactFlashFx {
   y: number;
   maxRadius: number;
   color: string;
+  secondaryColor?: string;
   age: number;
   duration: number;
-  kind: 'MUZZLE' | 'SHOCKWAVE' | 'SHIELD_SHATTER' | 'SPAWN_RIPPLE';
+  kind:
+    | 'MUZZLE'
+    | 'SHOCKWAVE'
+    | 'SHIELD_SHATTER'
+    | 'SPAWN_RIPPLE'
+    | 'SYNERGY_LINK'
+    | 'ELEMENTAL_REACTION';
 }
 
 export interface FloatingTextFx {
@@ -275,6 +324,8 @@ export interface HudSnapshot {
   gameOutcome: 'RUNNING' | 'VICTORY' | 'GAME_OVER';
   totalKills: number;
   totalDamage: number;
+  maxTileDamage: number;
+  hotTileCount: number;
   mapName: string;
   pathLength: number;
   selectedEntityId: string | null;
